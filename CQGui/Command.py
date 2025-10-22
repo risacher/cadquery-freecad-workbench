@@ -3,10 +3,44 @@
 
 """Adds all of the commands that are used for the menus of the CadQuery module"""
 
+import FreeCAD
 import FreeCADGui
 from PySide import QtGui
 from CQGui.HelpDialog import HelpDialog
 
+import cq_feature 
+import cq_editor_tools 
+
+EDIT_SESSION = {}
+
+class CadQueryCreateFeature:
+    """Command to create a parametric CadQuery Feature."""
+    
+    def GetResources(self):
+        return {"MenuText": "Create CadQuery Feature",
+                "Accel": "",
+                "ToolTip": "Creates a CadQuery Object",
+                "Pixmap": ":/icons/preferences-system.svg"}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        # 1. Create a generic container object
+        obj = FreeCAD.ActiveDocument.addObject("Part::FeaturePython", "CadQuery_Feature")
+        
+        # 2. Attach our Python proxy class to it
+        #    This is what gives it the custom icon, properties, and execute behavior.
+        cq_feature.CadQueryFeature(obj)
+        
+        # 3. Prompt user for the initial URL (optional, can be set later)
+        # ... dialog logic ...
+        
+        # 4. Finalize
+        obj.ViewObject.Proxy = 0 # This is a necessary boilerplate line
+        FreeCAD.ActiveDocument.recompute()
+
+        
 class CadQueryStableInstall:
     """
     Allows the user to easily attempt a manual install of the stable version of CadQuery
@@ -115,3 +149,121 @@ class CadQueryHelp:
         win = HelpDialog()
 
         win.exec_()
+
+import tempfile
+import os
+
+class EditCQFeatureScriptCommand:
+    """Checks out a feature's script to a temporary file and opens it for editing."""
+
+    def GetResources(self):
+        return {"MenuText": "Edit Script in Cache", "ToolTip": "Edit the selected feature's script in the editor."}
+
+    def IsActive(self):
+        sel = FreeCADGui.Selection.getSelection()
+        return len(sel) == 1 and hasattr(sel[0], "Proxy") and sel[0].Proxy.Type == 'CadQueryFeature'
+
+    def Activated(self):
+        global EDIT_SESSION
+        obj = FreeCADGui.Selection.getSelection()[0]
+        
+        # --- NEW: Automatically switch to Cache mode ---
+        obj.SourceMode = "Cache"
+        
+        fd, temp_path = tempfile.mkstemp(suffix='.py', text=True)
+        os.close(fd)
+
+        # Use the cache as the source of truth
+        if obj.CodeCache:
+            with open(temp_path, 'w') as f:
+                f.write("\n".join(obj.CodeCache))
+        
+        EDIT_SESSION['object_name'] = obj.Name
+        EDIT_SESSION['temp_path'] = temp_path
+        
+        FreeCADGui.open(temp_path)
+        FreeCAD.Console.PrintMessage(f"Switched '{obj.Label}' to Cache mode and opened script for editing.\n")
+
+
+class UpdateCQFeatureFromEditorCommand:
+    """Checks in the edited script from the temp file back to the object."""
+
+    def GetResources(self):
+        return {"MenuText": "Update Object from Editor", "ToolTip": "Updates the object with the code from the active editor tab."}
+
+    def IsActive(self):
+        return 'temp_path' in EDIT_SESSION
+
+    def Activated(self):
+        global EDIT_SESSION
+        
+        temp_path = EDIT_SESSION.get('temp_path')
+        obj_name = EDIT_SESSION.get('object_name')
+
+        if not temp_path or not obj_name:
+            return
+            
+        obj = FreeCAD.ActiveDocument.getObject(obj_name)
+        if not obj:
+            EDIT_SESSION.clear()
+            return
+
+        # --- REVISED LOGIC ---
+        try:
+            # 1. Read the updated code from the temp file
+            with open(temp_path, 'r') as f:
+                updated_code = f.read()
+            
+            # 2. Update the object's property
+            obj.CodeCache = updated_code.splitlines()
+            
+            # 3. Find and close the editor tab BEFORE deleting the file
+            mw = FreeCADGui.getMainWindow()
+            mdi_area = mw.findChild(QtGui.QMdiArea)
+            for sub_window in mdi_area.subWindowList():
+                if sub_window.windowFilePath() == temp_path:
+                    sub_window.close()
+                    break
+            
+            # 4. Now it's safe to delete the temp file
+            os.remove(temp_path)
+
+            FreeCAD.Console.PrintMessage(f"Updated '{obj.Label}' from script. Recomputing...\n")
+        
+        finally:
+            # 5. Always clear the session and trigger a recompute
+            EDIT_SESSION.clear()
+            FreeCAD.ActiveDocument.recompute()
+            
+# In your workbench's command file, e.g., commands.py
+
+
+class EditCQCodeCmd:
+    """The command class for our new 'Edit Code' button."""
+
+    def GetResources(self):
+        """Icon and tooltip for the command."""
+        return {
+            "Pixmap": "path_to_your_edit_icon.svg", # Your icon
+            "MenuText": "Edit CadQuery Code",
+            "ToolTip": "Opens the cached code for the selected object in an editor. Saving or closing will update the object."
+        }
+
+    def IsActive(self):
+        """Enables the button only if a single CadQuery feature is selected."""
+        sel = FreeCADGui.Selection.getSelection()
+        if len(sel) != 1:
+            return False
+        # Check if the selected object is one of yours
+        if hasattr(sel[0], "Proxy") and sel[0].Proxy.Type == 'CadQueryFeature':
+            return True
+        return False
+
+    def Activated(self):
+        """This is what runs when the button is clicked."""
+        sel = FreeCADGui.Selection.getSelection()
+        if self.IsActive():
+            target_object = sel[0]
+            # Call our new, robust function!
+            cq_editor_tools.launch_editor_for_feature(target_object)
+
