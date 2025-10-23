@@ -10,8 +10,13 @@ from CQGui.HelpDialog import HelpDialog
 
 import cq_feature 
 import cq_editor_tools 
+import os
 
 EDIT_SESSION = {}
+
+GUI_PATH = os.path.dirname(__file__)
+# This builds the full path to your icons folder
+ICON_PATH = os.path.join(GUI_PATH, "icons")
 
 class CadQueryCreateFeature:
     """Command to create a parametric CadQuery Feature."""
@@ -20,7 +25,7 @@ class CadQueryCreateFeature:
         return {"MenuText": "Create CadQuery Feature",
                 "Accel": "",
                 "ToolTip": "Creates a CadQuery Object",
-                "Pixmap": ":/icons/preferences-system.svg"}
+                "Pixmap": os.path.join(ICON_PATH, "CQ_New.svg")}
 
     def IsActive(self):
         return FreeCAD.ActiveDocument is not None
@@ -37,7 +42,12 @@ class CadQueryCreateFeature:
         # ... dialog logic ...
         
         # 4. Finalize
-        obj.ViewObject.Proxy = 0 # This is a necessary boilerplate line
+        if FreeCAD.GuiUp and hasattr(obj, "ViewObject"):
+            try:
+                obj.ViewObject.Proxy = cq_feature.CadQueryFeatureViewProvider(obj.ViewObject)
+                FreeCAD.Console.PrintMessage("ViewProvider attached successfully from Command.Activated.\n")
+            except Exception as e:
+                FreeCAD.Console.PrintError(f"Error attaching ViewProvider from Command.Activated: {e}\n")
         FreeCAD.ActiveDocument.recompute()
 
         
@@ -244,7 +254,7 @@ class EditCQCodeCmd:
     def GetResources(self):
         """Icon and tooltip for the command."""
         return {
-            "Pixmap": "path_to_your_edit_icon.svg", # Your icon
+            "Pixmap": os.path.join(ICON_PATH, "CQ_Edit.svg"), # Your icon
             "MenuText": "Edit CadQuery Code",
             "ToolTip": "Opens the cached code for the selected object in an editor. Saving or closing will update the object."
         }

@@ -81,7 +81,7 @@ def install_patch_with_link(target_filename, target_object_name):
                     FreeCAD.Console.PrintError(f"Error removing temp file: {e}\n")
                 del _installed_filters[target_filename]
 
-            FreeCAD.Console.PrintMessage(f"✅ Updated and recomputed '{target_obj.Label}' via linked property.\n")
+            # FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' via linked property.\n")
 
     # Prevent the filter from being garbage-collected by storing it globally
     _installed_filters[target_filename] = EditorEventFilter(editor_sub_window)
@@ -89,7 +89,7 @@ def install_patch_with_link(target_filename, target_object_name):
     editor_sub_window.installEventFilter(_installed_filters[target_filename])
     editor_widget.installEventFilter(_installed_filters[target_filename])
     
-    FreeCAD.Console.PrintMessage(f"✅ Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
+    # FreeCAD.Console.PrintMessage(f"Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
 
 def launch_editor_for_feature(obj):
     """

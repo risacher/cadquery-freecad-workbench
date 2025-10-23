@@ -4,24 +4,50 @@ import FreeCAD
 import cadquery as cq
 import urllib.request
 
-class CadQueryFeature:
-    """The Python Proxy class that gives our object its intelligence."""
+import os  
+WB_ROOT = os.path.dirname(__file__)
+ICON_PATH = os.path.join(WB_ROOT, "CQGui", "icons")
+
 
 class CadQueryFeature:
     """The Python Proxy class that gives our object its intelligence."""
 
     def __init__(self, obj):
-        """This is called when the object is created."""
+        """This is called only when the object is *first* created."""
+        FreeCAD.Console.PrintMessage(f"CadQueryFeature __init__ called for {obj.Label}\n") 
         obj.Proxy = self
         self.Type = 'CadQueryFeature'
+        self._is_internal_change = False
         
-        # --- MODIFIED PROPERTIES ---
-        # Add the new SourceMode property
-        obj.addProperty("App::PropertyEnumeration", "SourceMode", "CadQuery", "The source of the script to execute").SourceMode = ["URL", "Cache"]
-        obj.addProperty("App::PropertyString", "CodeURL", "CadQuery", "URL to the source .py file").CodeURL = ""
-        obj.addProperty("App::PropertyBool", "CacheEnabled", "CadQuery", "Update the cache when computing from URL").CacheEnabled = True
-        obj.addProperty("App::PropertyStringList", "CodeCache", "CadQuery", "A local cache of the source code")
+        # Add properties ONLY if they don't already exist (important for file load)
+        if not hasattr(obj, "SourceMode"):
+            obj.addProperty("App::PropertyEnumeration", "SourceMode", "CadQuery", "The source of the script to execute").SourceMode = ["URL", "Cache", "Frozen"]
+        if not hasattr(obj, "CodeURL"):
+            obj.addProperty("App::PropertyString", "CodeURL", "CadQuery", "URL to the source .py file").CodeURL = ""
+        if not hasattr(obj, "CacheEnabled"):
+            obj.addProperty("App::PropertyBool", "CacheEnabled", "CadQuery", "Update the cache when computing from URL").CacheEnabled = True
+        if not hasattr(obj, "CodeCache"):
+            obj.addProperty("App::PropertyStringList", "CodeCache", "CadQuery", "A local cache of the source code")
+        
+        # --- REMOVED: ViewProvider attachment logic is no longer done here ---
 
+    def onDocumentRestored(self, obj):
+        """Called when the object is restored from a file."""
+        FreeCAD.Console.PrintMessage(f"CadQueryFeature onDocumentRestored called for {obj.Label}\n")
+        self._is_internal_change = False # Ensure flag is reset on load
+        
+        # Attach the ViewProvider here, ensuring ViewObject exists.
+        if hasattr(obj, "ViewObject"):
+            FreeCAD.Console.PrintMessage("Attempting to attach ViewProvider from onDocumentRestored...\n") 
+            try:
+                # Explicitly create and assign the instance, like the forum example
+                obj.ViewObject.Proxy = CadQueryFeatureViewProvider(obj.ViewObject)
+                FreeCAD.Console.PrintMessage("ViewProvider attached successfully from onDocumentRestored.\n") 
+            except Exception as e:
+                FreeCAD.Console.PrintError(f"Error attaching ViewProvider from onDocumentRestored: {e}\n")
+        else:
+             FreeCAD.Console.PrintWarning(f"Object {obj.Label} restored without ViewObject, cannot attach ViewProvider.\n")
+        
     def execute(self, obj):
         """
         Recomputes the object based on the selected SourceMode.
@@ -35,17 +61,23 @@ class CadQueryFeature:
         
         source_code = ""
 
-        # --- NEW LOGIC: Get source code based on the mode ---
+        if obj.SourceMode == "Frozen":
+            FreeCAD.Console.PrintMessage(f"'{obj.Label}' is Frozen, skipping recompute.\n")
+            return
         if obj.SourceMode == "URL":
-            if not obj.CodeURL:
-                FreeCAD.Console.PrintWarning("SourceMode is URL, but CodeURL is empty.\n")
+            if not hasattr(obj, "CodeURL") or not obj.CodeURL:
+                FreeCAD.Console.PrintWarning("SourceMode is URL, but CodeURL is empty or missing.\n")
                 return
             try:
                 with urllib.request.urlopen(obj.CodeURL) as response:
                     source_code = response.read().decode('utf-8')
-                # If caching is on, update the cache
+                
                 if obj.CacheEnabled:
-                    obj.CodeCache = source_code.splitlines()
+                    self._is_internal_change = True
+                    try:
+                        obj.CodeCache = source_code.splitlines()
+                    finally:
+                        self._is_internal_change = False
             except Exception:
                 FreeCAD.Console.PrintError(f"Failed to fetch from URL: {obj.CodeURL}\n{traceback.format_exc()}\n")
                 return
@@ -60,14 +92,13 @@ class CadQueryFeature:
             FreeCAD.Console.PrintError("No source code to execute.\n")
             return
 
-        # --- The rest of the execution logic remains the same ---
         try:
             script_locals = {'cq': cq}
             exec(source_code, script_locals)
             result_obj = script_locals.get('result') or script_locals.get('show_object')
             
             if not result_obj:
-                return # Script ran but produced no result
+                return 
 
             brep_stream = BytesIO()
             if isinstance(result_obj, (cq.Workplane, cq.Shape)):
@@ -89,35 +120,56 @@ class CadQueryFeature:
         A gatekeeper that handles property changes intelligently. It now
         automatically switches to 'Cache' mode if the CodeCache is edited.
         """
-        #FreeCAD.Console.PrintMessage(f"onChanged fired! Prop: {prop}\n")
         from urllib.parse import urlparse
         
-        # CASE 1: The user manually edits the CodeCache property.
         if prop == "CodeCache":
-            # If the object is in URL mode, just switch it to Cache mode.
-            # This will fire another onChanged event for "SourceMode",
-            # which will then correctly call self.execute(obj).
+            if self._is_internal_change:
+                return 
+
             if obj.SourceMode != "Cache":
                 FreeCAD.Console.PrintMessage("CodeCache edited, automatically switching SourceMode to 'Cache'.\n")
-                obj.SourceMode = "Cache" # This should now force the GUI to update            obj.SourceMode = "Cache"
+                obj.SourceMode = "Cache" 
             else:
-                # If already in Cache mode, the user expects a recompute.
                 self.execute(obj)
-                return  # We've handled this event.
-            
-            # CASE 2: The user changes the SourceMode dropdown. This is now the
-            # single point of truth for recomputing after a mode switch.
-            if prop == "SourceMode":
-                self.execute(obj)
-                return
-            
-            # CASE 3: The user is typing in the CodeURL field.
-            if prop == "CodeURL" and obj.SourceMode == "URL":
-                url = obj.CodeURL
-                try:
-                    # Validate the URL to avoid recomputing on every keystroke.
-                    parsed = urlparse(url)
-                    if parsed.scheme in ['http', 'https', 'file'] and parsed.path.endswith('.py'):
-                        self.execute(obj)
-                except Exception:
-                    pass  # Ignore incomplete/malformed URLs.
+            return  
+        
+        if prop == "SourceMode":
+            self.execute(obj)
+            return
+        
+        if prop == "CodeURL" and obj.SourceMode == "URL":
+            if not hasattr(obj, "CodeURL"):
+                 return
+            url = obj.CodeURL
+            try:
+                parsed = urlparse(url)
+                if parsed.scheme in ['http', 'https', 'file'] and parsed.path.endswith('.py'):
+                    self.execute(obj)
+            except Exception:
+                pass  
+
+
+class CadQueryFeatureViewProvider:
+    """Controls how the CadQueryFeature object appears in the GUI."""
+    
+    def __init__(self, vobj):
+        """Called when the ViewObject is created."""
+        FreeCAD.Console.PrintMessage(f"ViewProvider __init__ called for object: {vobj.Object.Label}\n")
+        # --- Corrected: Assign self to the proxy ---
+        vobj.Proxy = self 
+    
+    def getIcon(self):
+        """Returns the absolute path to the icon for the Tree View."""
+        icon_path = os.path.join(ICON_PATH, "CQ_Logo.svg")
+        if not os.path.exists(icon_path):
+             FreeCAD.Console.PrintWarning(f"getIcon: Icon file not found at path: {icon_path}\n")
+        FreeCAD.Console.PrintMessage(f"getIcon called! Returning path: {icon_path}\n")
+        return icon_path
+    
+    def getCustomMenus(self):
+        """Returns a list of context menu items."""
+        return [{
+            'text': "Edit CadQuery Code",
+            'command': "CQ_EditCode" 
+        }]
+
