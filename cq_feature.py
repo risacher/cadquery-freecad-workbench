@@ -8,18 +8,31 @@ import os
 WB_ROOT = os.path.dirname(__file__)
 ICON_PATH = os.path.join(WB_ROOT, "CQGui", "icons")
 
+try:
+    from PySide6 import QtGui, QtCore, QtWidgets
+except ImportError:
+    try:
+        from PySide2 import QtGui, QtCore, QtWidgets
+    except ImportError:
+        from PySide import QtGui, QtCore # Older FreeCAD versions might use PySide (Qt4)
+try:
+    from . import cq_editor_tools
+except ImportError:
+    # Fallback for cases where direct relative import might fail (e.g., console execution)
+    import cq_editor_tools
 
 class CadQueryFeature:
     """The Python Proxy class that gives our object its intelligence."""
 
     def __init__(self, obj):
-        """This is called only when the object is *first* created."""
+        """Called when the object is *first* created."""
         FreeCAD.Console.PrintMessage(f"CadQueryFeature __init__ called for {obj.Label}\n") 
         obj.Proxy = self
         self.Type = 'CadQueryFeature'
         self._is_internal_change = False
         
-        # Add properties ONLY if they don't already exist (important for file load)
+        # --- RESTORED Properties ---
+        # Add properties ONLY if they don't already exist (still good practice)
         if not hasattr(obj, "SourceMode"):
             obj.addProperty("App::PropertyEnumeration", "SourceMode", "CadQuery", "The source of the script to execute").SourceMode = ["URL", "Cache", "Frozen"]
         if not hasattr(obj, "CodeURL"):
@@ -29,24 +42,24 @@ class CadQueryFeature:
         if not hasattr(obj, "CodeCache"):
             obj.addProperty("App::PropertyStringList", "CodeCache", "CadQuery", "A local cache of the source code")
         
-        # --- REMOVED: ViewProvider attachment logic is no longer done here ---
+        # --- NO ViewProvider logic here ---
 
     def onDocumentRestored(self, obj):
         """Called when the object is restored from a file."""
         FreeCAD.Console.PrintMessage(f"CadQueryFeature onDocumentRestored called for {obj.Label}\n")
-        self._is_internal_change = False # Ensure flag is reset on load
+        self._is_internal_change = False 
         
-        # Attach the ViewProvider here, ensuring ViewObject exists.
+        # Attach the ViewProvider here for file loading
         if hasattr(obj, "ViewObject"):
             FreeCAD.Console.PrintMessage("Attempting to attach ViewProvider from onDocumentRestored...\n") 
             try:
-                # Explicitly create and assign the instance, like the forum example
+                # Explicitly create and assign the instance
                 obj.ViewObject.Proxy = CadQueryFeatureViewProvider(obj.ViewObject)
                 FreeCAD.Console.PrintMessage("ViewProvider attached successfully from onDocumentRestored.\n") 
             except Exception as e:
                 FreeCAD.Console.PrintError(f"Error attaching ViewProvider from onDocumentRestored: {e}\n")
         else:
-             FreeCAD.Console.PrintWarning(f"Object {obj.Label} restored without ViewObject, cannot attach ViewProvider.\n")
+             FreeCAD.Console.PrintWarning(f"Object {obj.Label} restored without ViewObject.\n")
         
     def execute(self, obj):
         """
@@ -57,12 +70,12 @@ class CadQueryFeature:
         import urllib.request
         import traceback
 
-        FreeCAD.Console.PrintMessage(f"Recomputing {obj.Label}...\n")
+        #FreeCAD.Console.PrintMessage(f"Recomputing {obj.Label}...\n")
         
         source_code = ""
 
         if obj.SourceMode == "Frozen":
-            FreeCAD.Console.PrintMessage(f"'{obj.Label}' is Frozen, skipping recompute.\n")
+            #FreeCAD.Console.PrintMessage(f"'{obj.Label}' is Frozen, skipping recompute.\n")
             return
         if obj.SourceMode == "URL":
             if not hasattr(obj, "CodeURL") or not obj.CodeURL:
@@ -155,21 +168,34 @@ class CadQueryFeatureViewProvider:
     def __init__(self, vobj):
         """Called when the ViewObject is created."""
         FreeCAD.Console.PrintMessage(f"ViewProvider __init__ called for object: {vobj.Object.Label}\n")
-        # --- Corrected: Assign self to the proxy ---
         vobj.Proxy = self 
+        # Store a reference to the ViewObject - might not be needed now
+        # self.ViewObject = vobj 
     
+    # --- REMOVED claimChildren ---
+
     def getIcon(self):
         """Returns the absolute path to the icon for the Tree View."""
         icon_path = os.path.join(ICON_PATH, "CQ_Logo.svg")
-        if not os.path.exists(icon_path):
-             FreeCAD.Console.PrintWarning(f"getIcon: Icon file not found at path: {icon_path}\n")
-        FreeCAD.Console.PrintMessage(f"getIcon called! Returning path: {icon_path}\n")
+        #if not os.path.exists(icon_path):
+        #     FreeCAD.Console.PrintWarning(f"getIcon: Icon file not found at path: {icon_path}\n")
+        #FreeCAD.Console.PrintMessage(f"getIcon called! Returning path: {icon_path}\n")
         return icon_path
     
-    def getCustomMenus(self):
-        """Returns a list of context menu items."""
-        return [{
-            'text': "Edit CadQuery Code",
-            'command': "CQ_EditCode" 
-        }]
+    def _triggerEditCode(self, viewObject):
+        """Gets the linked data object and calls the editor launcher."""
+        FreeCAD.Console.PrintMessage("_triggerEditCode called!\n")
+        dataObject = viewObject.Object # Get the App::DocumentObject from the Gui::ViewProviderDocumentObject
+        if dataObject:
+             cq_editor_tools.launch_editor_for_feature(dataObject)
+        else:
+             FreeCAD.Console.PrintError("Could not get data object from view object in context menu action.\n")
 
+    def setupContextMenu(self, viewObject, menu):
+        """Adds items to the context menu using Qt actions and direct lambda connection."""
+        FreeCAD.Console.PrintMessage(f"setupContextMenu called for: {viewObject.Object.Label}\n")
+
+        edit_icon_path = os.path.join(ICON_PATH, "CQ_Edit.svg") 
+        edit_icon = QtGui.QIcon(edit_icon_path)
+        action = menu.addAction(edit_icon, "Edit CadQuery Code")
+        action.triggered.connect(lambda: self._triggerEditCode(viewObject))
