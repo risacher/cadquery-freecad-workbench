@@ -45,10 +45,22 @@ def install_patch_with_link(target_filename, target_object_name):
     class EditorEventFilter(QtCore.QObject):
         def eventFilter(self, watched_obj, event):
             is_close_event = (event.type() == QtCore.QEvent.Close and watched_obj is editor_sub_window)
-            is_save_event = (event.type() == QtCore.QEvent.KeyPress and 
-                             watched_obj is editor_widget and
-                             event.key() == QtCore.Qt.Key_S and 
-                             event.modifiers() == QtCore.Qt.ControlModifier)
+            
+            # --- FIXED: More robust Ctrl-S / Cmd-S detection ---
+            is_save_event = False
+            if event.type() == QtCore.QEvent.KeyPress and watched_obj is editor_widget:
+                # Check if it's 'S' key
+                if event.key() == QtCore.Qt.Key_S:
+                    # Check modifiers - handle both Control (Linux/Windows) and Meta (macOS Command key)
+                    modifiers = event.modifiers()
+                    # On macOS, Cmd is Qt.MetaModifier; on Linux/Windows, Ctrl is Qt.ControlModifier
+                    has_ctrl = bool(modifiers & QtCore.Qt.ControlModifier)
+                    has_meta = bool(modifiers & QtCore.Qt.MetaModifier)
+                    
+                    # Accept either Ctrl+S or Cmd+S (Meta+S)
+                    if has_ctrl or has_meta:
+                        is_save_event = True
+                        FreeCAD.Console.PrintMessage(f"Save shortcut detected (Ctrl={has_ctrl}, Meta={has_meta})\n")
             
             if is_save_event or is_close_event:
                 self.update_cadquery_object(editor_sub_window, editor_widget)
@@ -81,7 +93,7 @@ def install_patch_with_link(target_filename, target_object_name):
                     FreeCAD.Console.PrintError(f"Error removing temp file: {e}\n")
                 del _installed_filters[target_filename]
 
-            # FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' via linked property.\n")
+            FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' via linked property.\n")
 
     # Prevent the filter from being garbage-collected by storing it globally
     _installed_filters[target_filename] = EditorEventFilter(editor_sub_window)
@@ -89,7 +101,7 @@ def install_patch_with_link(target_filename, target_object_name):
     editor_sub_window.installEventFilter(_installed_filters[target_filename])
     editor_widget.installEventFilter(_installed_filters[target_filename])
     
-    # FreeCAD.Console.PrintMessage(f"Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
+    FreeCAD.Console.PrintMessage(f"Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
 
 def launch_editor_for_feature(obj):
     """
@@ -111,4 +123,3 @@ def launch_editor_for_feature(obj):
     
     # Now that the file is open, find its window and install our patch
     install_patch_with_link(temp_path, obj.Name)
-
