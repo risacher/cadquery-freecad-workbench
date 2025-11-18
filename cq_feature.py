@@ -1,13 +1,20 @@
 # In cq_feature.py
 
 import FreeCAD
-import cadquery as cq
 import urllib.request
 import os
 import traceback
 from io import BytesIO
 from urllib.parse import urlparse
 import Part # Import Part module
+
+# --- Defer cadquery import until needed ---
+cq = None
+try:
+    import cadquery as cq
+    FreeCAD.Console.PrintMessage("CadQuery module loaded successfully.\n")
+except ImportError:
+    FreeCAD.Console.PrintWarning("CadQuery module not found. CadQuery features will not execute until CadQuery is installed.\n")
 
 # --- Define paths relative to this file ---
 WB_ROOT = os.path.dirname(__file__)
@@ -112,6 +119,13 @@ class CadQueryFeature:
 
     def execute(self, obj):
         """Recomputes the object based on the selected SourceMode and parameters."""
+        # --- Check if cadquery is available ---
+        if cq is None:
+            FreeCAD.Console.PrintError(f"Cannot execute '{obj.Label}': CadQuery module is not installed.\n")
+            FreeCAD.Console.PrintError("Please install CadQuery using the workbench menu: CadQuery -> Install -> Install CadQuery (Stable)\n")
+            obj.Shape = Part.Shape()
+            return
+
         # --- MODIFIED Safety Check ---
         # Use the imported function from cq_utils
         is_safe = True # Default to safe if cq_utils failed to import
@@ -328,4 +342,3 @@ class CadQueryFeatureViewProvider:
             action = menu.addAction("Edit CadQuery Code") # Add without icon
 
         action.triggered.connect(lambda: self._triggerEditCode(viewObject))
-
