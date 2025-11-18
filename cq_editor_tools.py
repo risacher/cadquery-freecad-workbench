@@ -11,14 +11,14 @@ import tempfile
 import os
 
 # --- Globals: Use a dictionary to track multiple patched editors ---
-_installed_filters = {}
+_installed_patches = {}
 
 def install_patch_with_link(target_filename, target_object_name):
     """
     Finds an editor by its MDI window title, links it to a specific
-    CadQuery object via a custom property, and installs the event filter.
+    CadQuery object via a custom property, and patches its save method.
     """
-    global _installed_filters
+    global _installed_patches
 
     main_window = FreeCADGui.getMainWindow()
     mdi_area = main_window.findChild(QtWidgets.QMdiArea)
@@ -37,73 +37,132 @@ def install_patch_with_link(target_filename, target_object_name):
     editor_widget = editor_sub_window.widget().findChild(QtWidgets.QPlainTextEdit)
     if not editor_widget: return
     
-    # --- This is the key to the new robust design ---
-    # Store the object's unique name as a custom property on its editor window.
+    # Store the object's unique name as a custom property on the editor window
     editor_sub_window.setProperty("targetCQObjectName", target_object_name)
+    editor_sub_window.setProperty("targetTempFilename", target_filename)
 
-    # --- Define the Event Filter ---
-    class EditorEventFilter(QtCore.QObject):
-        def __init__(self, parent, editor_widget, editor_sub_window):
+    # Find the PythonEditor view object
+    python_editor_view = None
+    for view in FreeCADGui.ActiveDocument.ActiveView.getViews():
+        # The view's document name should match our temp file
+        if hasattr(view, 'fileName') and view.fileName() == target_filename:
+            python_editor_view = view
+            break
+    
+    # Alternative: try to get it from the subwindow's widget
+    if not python_editor_view:
+        widget = editor_sub_window.widget()
+        if hasattr(widget, 'view'):
+            python_editor_view = widget.view
+        elif hasattr(widget, 'getView'):
+            python_editor_view = widget.getView()
+    
+    if not python_editor_view:
+        FreeCAD.Console.PrintWarning(f"Could not find PythonEditor view for '{target_filename}'. Falling back to close-only monitoring.\n")
+        # Install close event filter as fallback
+        install_close_event_filter(editor_sub_window, editor_widget, target_filename)
+        return
+
+    # Store the original save method
+    original_save = python_editor_view.save if hasattr(python_editor_view, 'save') else None
+    
+    if not original_save:
+        FreeCAD.Console.PrintWarning(f"PythonEditor view has no 'save' method. Falling back to close-only monitoring.\n")
+        install_close_event_filter(editor_sub_window, editor_widget, target_filename)
+        return
+
+    # Define our custom save method
+    def custom_save():
+        """Custom save that updates the CadQuery object and calls original save."""
+        FreeCAD.Console.PrintMessage(f"Custom save triggered for CQ editor!\n")
+        
+        # Get the object name from the window property
+        obj_name = editor_sub_window.property("targetCQObjectName")
+        if obj_name:
+            doc = FreeCAD.ActiveDocument
+            if doc:
+                target_obj = doc.getObject(obj_name)
+                if target_obj:
+                    source_code = editor_widget.toPlainText()
+                    target_obj.CodeCache = source_code.splitlines()
+                    target_obj.recompute()
+                    FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' from save.\n")
+        
+        # Call the original save method
+        return original_save()
+    
+    # Replace the save method
+    python_editor_view.save = custom_save
+    
+    # Store reference to prevent garbage collection and allow cleanup
+    _installed_patches[target_filename] = {
+        'view': python_editor_view,
+        'original_save': original_save,
+        'sub_window': editor_sub_window,
+        'editor_widget': editor_widget
+    }
+    
+    # Also install close event filter for cleanup
+    install_close_event_filter(editor_sub_window, editor_widget, target_filename)
+    
+    FreeCAD.Console.PrintMessage(f"Save method patched for '{target_object_name}' on editor '{target_filename}'.\n")
+
+
+def install_close_event_filter(editor_sub_window, editor_widget, target_filename):
+    """Install an event filter to handle window close events."""
+    
+    class CloseEventFilter(QtCore.QObject):
+        def __init__(self, parent, sub_window, editor, filename):
             super().__init__(parent)
-            self.editor_widget = editor_widget
-            self.editor_sub_window = editor_sub_window
+            self.sub_window = sub_window
+            self.editor = editor
+            self.filename = filename
             
         def eventFilter(self, watched_obj, event):
-            # Check for close event on the sub-window
-            is_close_event = (event.type() == QtCore.QEvent.Close and watched_obj is self.editor_sub_window)
-            
-            # --- FIXED: Intercept save at application level before FreeCAD gets it ---
-            is_save_event = False
-            if event.type() == QtCore.QEvent.KeyPress:
-                # Check if it's 'S' key
-                if event.key() == QtCore.Qt.Key_S:
-                    # Check modifiers - handle both Control (Linux/Windows) and Meta (macOS Command key)
-                    modifiers = event.modifiers()
-                    # On macOS, Cmd is Qt.MetaModifier; on Linux/Windows, Ctrl is Qt.ControlModifier
-                    has_ctrl = bool(modifiers & QtCore.Qt.ControlModifier)
-                    has_meta = bool(modifiers & QtCore.Qt.MetaModifier)
-                    
-                    # Accept either Ctrl+S or Cmd+S (Meta+S)
-                    if has_ctrl or has_meta:
-                        # Check if our editor widget has focus
-                        focused_widget = QtWidgets.QApplication.focusWidget()
-                        if focused_widget is self.editor_widget:
-                            is_save_event = True
-                            FreeCAD.Console.PrintMessage(f"Save shortcut detected in CQ editor (Ctrl={has_ctrl}, Meta={has_meta})\n")
-            
-            if is_save_event or is_close_event:
-                self.update_cadquery_object(self.editor_sub_window, self.editor_widget)
-                if is_save_event:
-                    event.accept()
-                    return True # Stop the event from propagating to FreeCAD's save handler
-
+            if event.type() == QtCore.QEvent.Close and watched_obj is self.sub_window:
+                self.on_editor_close()
             return super().eventFilter(watched_obj, event)
-
-        def update_cadquery_object(self, sub_window, editor):
-            # --- Retrieve the link from the custom property ---
-            obj_name = sub_window.property("targetCQObjectName")
-            if not obj_name: return
-
-            doc = FreeCAD.ActiveDocument
-            target_obj = doc.getObject(obj_name)
-            if not target_obj: return
-
-            source_code = editor.toPlainText()
-            target_obj.CodeCache = source_code.splitlines()
-            target_obj.recompute()
+        
+        def on_editor_close(self):
+            """Handle editor close - update CadQuery object and cleanup."""
+            obj_name = self.sub_window.property("targetCQObjectName")
+            if obj_name:
+                doc = FreeCAD.ActiveDocument
+                if doc:
+                    target_obj = doc.getObject(obj_name)
+                    if target_obj:
+                        source_code = self.editor.toPlainText()
+                        target_obj.CodeCache = source_code.splitlines()
+                        target_obj.recompute()
+                        FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' on close.\n")
             
-            FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' via linked property.\n")
+            # Cleanup
+            if self.filename in _installed_patches:
+                patch_info = _installed_patches[self.filename]
+                # Restore original save method if we patched it
+                if 'view' in patch_info and 'original_save' in patch_info:
+                    try:
+                        patch_info['view'].save = patch_info['original_save']
+                    except:
+                        pass
+                del _installed_patches[self.filename]
+            
+            # Remove temp file
+            try:
+                if os.path.exists(self.filename):
+                    os.remove(self.filename)
+                    FreeCAD.Console.PrintMessage(f"Removed temp file: {self.filename}\n")
+            except OSError as e:
+                FreeCAD.Console.PrintError(f"Error removing temp file: {e}\n")
+    
+    close_filter = CloseEventFilter(editor_sub_window, editor_sub_window, editor_widget, target_filename)
+    editor_sub_window.installEventFilter(close_filter)
+    
+    # Store to prevent garbage collection
+    if target_filename not in _installed_patches:
+        _installed_patches[target_filename] = {}
+    _installed_patches[target_filename]['close_filter'] = close_filter
 
-    # Prevent the filter from being garbage-collected by storing it globally
-    event_filter = EditorEventFilter(main_window, editor_widget, editor_sub_window)
-    _installed_filters[target_filename] = event_filter
-    
-    # Install on main window to intercept events BEFORE FreeCAD's handlers
-    main_window.installEventFilter(event_filter)
-    # Also install on sub-window for close events
-    editor_sub_window.installEventFilter(event_filter)
-    
-    FreeCAD.Console.PrintMessage(f"Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
 
 def launch_editor_for_feature(obj):
     """
