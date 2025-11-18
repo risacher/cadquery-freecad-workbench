@@ -43,12 +43,18 @@ def install_patch_with_link(target_filename, target_object_name):
 
     # --- Define the Event Filter ---
     class EditorEventFilter(QtCore.QObject):
-        def eventFilter(self, watched_obj, event):
-            is_close_event = (event.type() == QtCore.QEvent.Close and watched_obj is editor_sub_window)
+        def __init__(self, parent, editor_widget, editor_sub_window):
+            super().__init__(parent)
+            self.editor_widget = editor_widget
+            self.editor_sub_window = editor_sub_window
             
-            # --- FIXED: More robust Ctrl-S / Cmd-S detection ---
+        def eventFilter(self, watched_obj, event):
+            # Check for close event on the sub-window
+            is_close_event = (event.type() == QtCore.QEvent.Close and watched_obj is self.editor_sub_window)
+            
+            # --- FIXED: Intercept save at application level before FreeCAD gets it ---
             is_save_event = False
-            if event.type() == QtCore.QEvent.KeyPress and watched_obj is editor_widget:
+            if event.type() == QtCore.QEvent.KeyPress:
                 # Check if it's 'S' key
                 if event.key() == QtCore.Qt.Key_S:
                     # Check modifiers - handle both Control (Linux/Windows) and Meta (macOS Command key)
@@ -59,14 +65,17 @@ def install_patch_with_link(target_filename, target_object_name):
                     
                     # Accept either Ctrl+S or Cmd+S (Meta+S)
                     if has_ctrl or has_meta:
-                        is_save_event = True
-                        FreeCAD.Console.PrintMessage(f"Save shortcut detected (Ctrl={has_ctrl}, Meta={has_meta})\n")
+                        # Check if our editor widget has focus
+                        focused_widget = QtWidgets.QApplication.focusWidget()
+                        if focused_widget is self.editor_widget:
+                            is_save_event = True
+                            FreeCAD.Console.PrintMessage(f"Save shortcut detected in CQ editor (Ctrl={has_ctrl}, Meta={has_meta})\n")
             
             if is_save_event or is_close_event:
-                self.update_cadquery_object(editor_sub_window, editor_widget)
+                self.update_cadquery_object(self.editor_sub_window, self.editor_widget)
                 if is_save_event:
                     event.accept()
-                    return True # Stop the event from propagating further
+                    return True # Stop the event from propagating to FreeCAD's save handler
 
             return super().eventFilter(watched_obj, event)
 
@@ -83,23 +92,16 @@ def install_patch_with_link(target_filename, target_object_name):
             target_obj.CodeCache = source_code.splitlines()
             target_obj.recompute()
             
-            # --- Cleanup ---
-            # Remove the temp file and our filter from the global dict
-            if target_filename in _installed_filters:
-                try:
-                    os.remove(target_filename)
-                    FreeCAD.Console.PrintMessage(f"Removed temp file: {target_filename}\n")
-                except OSError as e:
-                    FreeCAD.Console.PrintError(f"Error removing temp file: {e}\n")
-                del _installed_filters[target_filename]
-
             FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}' via linked property.\n")
 
     # Prevent the filter from being garbage-collected by storing it globally
-    _installed_filters[target_filename] = EditorEventFilter(editor_sub_window)
+    event_filter = EditorEventFilter(main_window, editor_widget, editor_sub_window)
+    _installed_filters[target_filename] = event_filter
     
-    editor_sub_window.installEventFilter(_installed_filters[target_filename])
-    editor_widget.installEventFilter(_installed_filters[target_filename])
+    # Install on main window to intercept events BEFORE FreeCAD's handlers
+    main_window.installEventFilter(event_filter)
+    # Also install on sub-window for close events
+    editor_sub_window.installEventFilter(event_filter)
     
     FreeCAD.Console.PrintMessage(f"Patch installed for '{target_object_name}' on editor '{target_filename}'.\n")
 
