@@ -183,7 +183,23 @@ class CadQueryFeature:
             return
 
         # --- Extract Parameters ---
-        script_locals = {'cq': cq}
+        # Create a list to collect shapes from show() and show_object() calls
+        collected_shapes = []
+        
+        def show_shim(cq_object, options=None, name=None):
+            """Shim for show() function to collect shapes."""
+            collected_shapes.append(cq_object)
+        
+        def show_object_shim(cq_object, name=None, options=None):
+            """Shim for show_object() function to collect shapes."""
+            collected_shapes.append(cq_object)
+        
+        script_locals = {
+            'cq': cq,
+            'show': show_shim,
+            'show_object': show_object_shim
+        }
+        
         if hasattr(obj, "ParameterSource") and obj.ParameterSource:
             param_obj = obj.ParameterSource
             FreeCAD.Console.PrintMessage(f"Loading parameters from: {param_obj.Label} ({param_obj.TypeId})\n")
@@ -227,10 +243,50 @@ class CadQueryFeature:
         # --- Execute Script ---
         try:
             exec(source_code, script_locals)
-            result_obj = script_locals.get('result') or script_locals.get('show_object')
+            
+            # Determine the result object
+            result_obj = None
+            
+            # First priority: check if show() or show_object() were called
+            if collected_shapes:
+                FreeCAD.Console.PrintMessage(f"Found {len(collected_shapes)} shape(s) from show()/show_object() calls.\n")
+                if len(collected_shapes) == 1:
+                    result_obj = collected_shapes[0]
+                else:
+                    # Multiple shapes - combine them into a compound
+                    try:
+                        # Extract the actual shapes from Workplanes if needed
+                        shapes_to_combine = []
+                        for shape in collected_shapes:
+                            if isinstance(shape, cq.Workplane):
+                                shapes_to_combine.append(shape.val())
+                            elif isinstance(shape, cq.Shape):
+                                shapes_to_combine.append(shape)
+                            else:
+                                FreeCAD.Console.PrintWarning(f"Skipping unsupported object type in show(): {type(shape).__name__}\n")
+                        
+                        if shapes_to_combine:
+                            result_obj = cq.Compound.makeCompound(shapes_to_combine)
+                            FreeCAD.Console.PrintMessage(f"Combined {len(shapes_to_combine)} shapes into a compound.\n")
+                    except Exception as e:
+                        FreeCAD.Console.PrintError(f"Error combining multiple shapes: {e}\n")
+                        result_obj = collected_shapes[0]  # Fallback to first shape
+            
+            # Second priority: check for 'result' variable
+            if result_obj is None:
+                result_obj = script_locals.get('result')
+                if result_obj:
+                    FreeCAD.Console.PrintMessage("Using 'result' variable from script.\n")
+            
+            # Third priority: check for legacy 'show_object' variable (shouldn't happen with shim, but just in case)
+            if result_obj is None:
+                result_obj = script_locals.get('show_object')
+                if result_obj and callable(result_obj):
+                    # It's the function, not a result
+                    result_obj = None
 
             if not result_obj:
-                FreeCAD.Console.PrintWarning("Script executed but did not produce a 'result' or 'show_object'.\n")
+                FreeCAD.Console.PrintWarning("Script executed but did not produce a 'result' or call show()/show_object().\n")
                 obj.Shape = Part.Shape()
                 return
 
