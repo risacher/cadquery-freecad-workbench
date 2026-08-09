@@ -115,6 +115,15 @@ class CadQueryFeature:
             except Exception as e:
                 FreeCAD.Console.PrintError(f"Error attaching ViewProvider from onDocumentRestored: {e}\n")
 
+        # NB: there is deliberately no rebuild scheduled here. This hook runs
+        # BEFORE the restore-time recompute, and FreeCAD purges touched flags
+        # once the restore finishes, so touch() and enforceRecompute() are both
+        # erased and the object comes back 'Up-to-date'. A document observer is
+        # no help either: as of FreeCAD 1.1 no restore-related slot
+        # (slotFinishRestoreDocument / slotFinishRestoreObject) is emitted at
+        # all during openDocument. So execute() keeps the saved shape and the
+        # first explicit recompute picks up code and parameter changes.
+
     def execute(self, obj):
         """Recomputes the object based on the selected SourceMode and parameters."""
         if cq is None:
@@ -130,6 +139,17 @@ class CadQueryFeature:
             FreeCAD.Console.PrintWarning(f"Execution of '{obj.Label}' deferred pending document security check.\n")
             if obj.SourceMode != "Frozen":
                  obj.Shape = Part.Shape() 
+            return
+
+        # FreeCAD recomputes objects while the document is still being restored.
+        # At that point a linked Spreadsheet exists but has NOT yet repopulated
+        # its per-cell alias properties, so the parameter loop below finds
+        # nothing and the script silently falls back to its own defaults --
+        # producing a wrong shape that looks like ParameterSource was ignored.
+        # Leave the shape as saved; the first explicit recompute once the
+        # document is open rebuilds it with the sheet readable. See the note in
+        # onDocumentRestored for why that cannot be scheduled automatically.
+        if 'Restore' in obj.State:
             return
 
         FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
@@ -192,8 +212,19 @@ class CadQueryFeature:
                             alias = param_obj.getAlias(prop_name)
                             if alias:
                                 value_obj = param_obj.get(prop_name)
-                                if value_obj is not None and hasattr(value_obj, 'Value'):
-                                    script_locals[alias] = float(value_obj.Value)
+                                if value_obj is not None:
+                                    # A cell with units comes back as a Quantity;
+                                    # a bare number comes back as a plain int,
+                                    # float or str with no .Value. Requiring
+                                    # .Value silently dropped every unitless
+                                    # parameter -- counts, ratios, flags -- and
+                                    # the script saw its own default instead.
+                                    # Same handling as the VarSet branch below.
+                                    value = getattr(value_obj, 'Value', value_obj)
+                                    try:
+                                        script_locals[alias] = float(value)
+                                    except (TypeError, ValueError):
+                                        script_locals[alias] = value
                         except Exception: pass
 
                 elif param_obj.TypeId == 'App::VarSet': 
