@@ -87,71 +87,59 @@ class CadQueryFeature:
         if not hasattr(obj, "ParameterSource"):
             obj.addProperty("App::PropertyLink", "ParameterSource", "CadQuery", "Optional Spreadsheet or VarSet for parameters")
 
-        # --- ViewProvider Attachment (Attempt in __init__ for robustness) ---
+        # --- ViewProvider Attachment ---
         if FreeCAD.GuiUp and hasattr(obj, "ViewObject"):
              try:
                  if getattr(obj.ViewObject, "Proxy", None) is None:
                      obj.ViewObject.Proxy = CadQueryFeatureViewProvider(obj.ViewObject)
-                     FreeCAD.Console.PrintMessage("ViewProvider attached from __init__.\n")
              except Exception as e:
-                 FreeCAD.Console.PrintError(f"Error attaching ViewProvider from __init__: {e}\n{traceback.format_exc()}\n")
+                 FreeCAD.Console.PrintError(f"Error attaching ViewProvider from __init__: {e}\n")
 
+    def __getstate__(self):
+        """Return only serializable data for FreeCAD's PropertyPythonObject."""
+        return {'Type': self.Type}
+
+    def __setstate__(self, state):
+        """Restore state from serialized data."""
+        self.Type = state.get('Type', 'CadQueryFeature')
+        self._is_internal_change = False
 
     def onDocumentRestored(self, obj):
         """Called by FreeCAD after the object is restored from a file."""
-        FreeCAD.Console.PrintMessage(f"CadQueryFeature onDocumentRestored called for {obj.Label}\n")
-        self._is_internal_change = False # Reset flag on load
+        self._is_internal_change = False 
 
-        # Attach the ViewProvider proxy if in GUI mode
         if FreeCAD.GuiUp and hasattr(obj, "ViewObject"):
-            FreeCAD.Console.PrintMessage("Attempting to attach ViewProvider from onDocumentRestored...\n")
             try:
                 if getattr(obj.ViewObject, "Proxy", None) is None or not isinstance(obj.ViewObject.Proxy, CadQueryFeatureViewProvider):
                      obj.ViewObject.Proxy = CadQueryFeatureViewProvider(obj.ViewObject)
-                     FreeCAD.Console.PrintMessage("ViewProvider attached successfully from onDocumentRestored.\n")
-                else:
-                    FreeCAD.Console.PrintMessage("ViewProvider already attached during onDocumentRestored.\n")
-
             except Exception as e:
-                FreeCAD.Console.PrintError(f"Error attaching ViewProvider from onDocumentRestored: {e}\n{traceback.format_exc()}\n")
-        else:
-             FreeCAD.Console.PrintWarning(f"Object {obj.Label} restored without ViewObject (possibly console mode).\n")
+                FreeCAD.Console.PrintError(f"Error attaching ViewProvider from onDocumentRestored: {e}\n")
 
     def execute(self, obj):
         """Recomputes the object based on the selected SourceMode and parameters."""
-        # --- Check if cadquery is available ---
         if cq is None:
             FreeCAD.Console.PrintError(f"Cannot execute '{obj.Label}': CadQuery module is not installed.\n")
-            FreeCAD.Console.PrintError("Please install CadQuery using the workbench menu: CadQuery -> Install -> Install CadQuery (Stable)\n")
             obj.Shape = Part.Shape()
             return
 
-        # --- MODIFIED Safety Check ---
-        # Use the imported function from cq_utils
-        is_safe = True # Default to safe if cq_utils failed to import
+        is_safe = True 
         if cq_utils and hasattr(cq_utils, 'is_safe_to_execute'):
             is_safe = cq_utils.is_safe_to_execute(obj)
 
-        # Only block execution if we're in GUI mode AND the check hasn't passed
         if not is_safe and FreeCAD.GuiUp:
             FreeCAD.Console.PrintWarning(f"Execution of '{obj.Label}' deferred pending document security check.\n")
             if obj.SourceMode != "Frozen":
-                 obj.Shape = Part.Shape() # Clear shape if deferred
+                 obj.Shape = Part.Shape() 
             return
-        # --- End Safety Check ---
 
         FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
         source_code = ""
 
-        # --- Handle Frozen State ---
         if obj.SourceMode == "Frozen":
-            FreeCAD.Console.PrintMessage(f"'{obj.Label}' is Frozen, skipping execution.\n")
             return
 
-        # --- Get Source Code ---
         if obj.SourceMode == "URL":
             if not hasattr(obj, "CodeURL") or not obj.CodeURL:
-                FreeCAD.Console.PrintWarning("SourceMode is URL, but CodeURL is empty or missing.\n")
                 obj.Shape = Part.Shape()
                 return
             try:
@@ -166,32 +154,26 @@ class CadQueryFeature:
                     finally:
                         self._is_internal_change = False
             except Exception:
-                FreeCAD.Console.PrintError(f"Failed to fetch from URL: {obj.CodeURL}\n{traceback.format_exc()}\n")
+                FreeCAD.Console.PrintError(f"Failed to fetch from URL: {obj.CodeURL}\n")
                 obj.Shape = Part.Shape()
                 return
 
         elif obj.SourceMode == "Cache":
             if not obj.CodeCache:
-                FreeCAD.Console.PrintWarning("SourceMode is Cache, but CodeCache is empty.\n")
                 obj.Shape = Part.Shape()
                 return
             source_code = "\n".join(obj.CodeCache)
 
         if not source_code:
-            FreeCAD.Console.PrintError("No source code available to execute.\n")
             obj.Shape = Part.Shape()
             return
 
-        # --- Extract Parameters ---
-        # Create a list to collect shapes from show() and show_object() calls
         collected_shapes = []
         
         def show_shim(cq_object, options=None, name=None):
-            """Shim for show() function to collect shapes."""
             collected_shapes.append(cq_object)
         
         def show_object_shim(cq_object, name=None, options=None):
-            """Shim for show_object() function to collect shapes."""
             collected_shapes.append(cq_object)
         
         script_locals = {
@@ -202,7 +184,6 @@ class CadQueryFeature:
         
         if hasattr(obj, "ParameterSource") and obj.ParameterSource:
             param_obj = obj.ParameterSource
-            FreeCAD.Console.PrintMessage(f"Loading parameters from: {param_obj.Label} ({param_obj.TypeId})\n")
             try:
                 if param_obj.TypeId == 'Spreadsheet::Sheet':
                     for prop_name in param_obj.PropertiesList:
@@ -213,80 +194,41 @@ class CadQueryFeature:
                                 value_obj = param_obj.get(prop_name)
                                 if value_obj is not None and hasattr(value_obj, 'Value'):
                                     script_locals[alias] = float(value_obj.Value)
-                                    FreeCAD.Console.PrintMessage(f"  Loaded Spreadsheet param: {alias} (from cell {prop_name}) = {script_locals[alias]}\n")
-                                else:
-                                    FreeCAD.Console.PrintWarning(f"  Spreadsheet alias '{alias}' (cell {prop_name}) has no value or is not a Quantity.\n")
-                        except Exception:
-                             pass
+                        except Exception: pass
 
-                elif param_obj.TypeId == 'App::VarSet': # VarSet
-                     FreeCAD.Console.PrintMessage("Processing VarSet...\n")
+                elif param_obj.TypeId == 'App::VarSet': 
                      for prop_name in param_obj.PropertiesList:
                          if prop_name.startswith('_'): continue
                          prop_obj = param_obj.getPropertyByName(prop_name)
                          value = getattr(prop_obj, 'Value', prop_obj)
-                         final_value = None
                          try:
-                             final_value = float(value)
+                             script_locals[prop_name] = float(value)
                          except (TypeError, ValueError):
-                             final_value = value
-
-                         script_locals[prop_name] = final_value
-                         FreeCAD.Console.PrintMessage(f"  Loaded VarSet param: {prop_name} = {script_locals[prop_name]} (type: {type(script_locals[prop_name])})\n")
-                else:
-                    FreeCAD.Console.PrintWarning(f"Linked ParameterSource object '{param_obj.Label}' is not a Spreadsheet or VarSet ({param_obj.TypeId}).\n")
-
+                             script_locals[prop_name] = value
             except Exception as e:
-                 FreeCAD.Console.PrintError(f"Error reading parameters from '{param_obj.Label}': {e}\n{traceback.format_exc()}\n")
+                 FreeCAD.Console.PrintError(f"Error reading parameters: {e}\n")
 
-
-        # --- Execute Script ---
         try:
             exec(source_code, script_locals)
-            
-            # Determine the result object
             result_obj = None
             
-            # First priority: check if show() or show_object() were called
             if collected_shapes:
-                FreeCAD.Console.PrintMessage(f"Found {len(collected_shapes)} shape(s) from show()/show_object() calls.\n")
                 if len(collected_shapes) == 1:
                     result_obj = collected_shapes[0]
                 else:
-                    # Multiple shapes - combine them into a compound
-                    try:
-                        # Extract the actual shapes from Workplanes if needed
-                        shapes_to_combine = []
-                        for shape in collected_shapes:
-                            if isinstance(shape, cq.Workplane):
-                                shapes_to_combine.append(shape.val())
-                            elif isinstance(shape, cq.Shape):
-                                shapes_to_combine.append(shape)
-                            else:
-                                FreeCAD.Console.PrintWarning(f"Skipping unsupported object type in show(): {type(shape).__name__}\n")
-                        
-                        if shapes_to_combine:
-                            result_obj = cq.Compound.makeCompound(shapes_to_combine)
-                            FreeCAD.Console.PrintMessage(f"Combined {len(shapes_to_combine)} shapes into a compound.\n")
-                    except Exception as e:
-                        FreeCAD.Console.PrintError(f"Error combining multiple shapes: {e}\n")
-                        result_obj = collected_shapes[0]  # Fallback to first shape
+                    shapes_to_combine = []
+                    for shape in collected_shapes:
+                        if isinstance(shape, cq.Workplane):
+                            shapes_to_combine.append(shape.val())
+                        elif isinstance(shape, cq.Shape):
+                            shapes_to_combine.append(shape)
+                    if shapes_to_combine:
+                        result_obj = cq.Compound.makeCompound(shapes_to_combine)
             
-            # Second priority: check for 'result' variable
             if result_obj is None:
                 result_obj = script_locals.get('result')
-                if result_obj:
-                    FreeCAD.Console.PrintMessage("Using 'result' variable from script.\n")
-            
-            # Third priority: check for legacy 'show_object' variable (shouldn't happen with shim, but just in case)
-            if result_obj is None:
-                result_obj = script_locals.get('show_object')
-                if result_obj and callable(result_obj):
-                    # It's the function, not a result
-                    result_obj = None
 
             if not result_obj:
-                FreeCAD.Console.PrintWarning("Script executed but did not produce a 'result' or call show()/show_object().\n")
                 obj.Shape = Part.Shape()
                 return
 
@@ -302,24 +244,16 @@ class CadQueryFeature:
                        actual_shape = val_result
 
                 if actual_shape is None:
-                    raise TypeError("Result is not a valid CadQuery Shape or could not be extracted from Workplane.")
+                    raise TypeError("Result extraction failed.")
 
                 actual_shape.exportBrep(brep_stream)
                 part_shape = Part.Shape()
                 brep_string = brep_stream.getvalue().decode('utf-8')
                 part_shape.importBrepFromString(brep_string)
-                if part_shape.isNull():
-                     raise ValueError("Failed to import BRep string into Part.Shape. BRep might be invalid.")
                 obj.Shape = part_shape
-                FreeCAD.Console.PrintMessage(f"Successfully updated shape for {obj.Label}.\n")
-
-            else:
-                FreeCAD.Console.PrintError(f"Result object type ({type(result_obj).__name__}) not supported. Expected CadQuery Workplane or Shape.\n")
-                obj.Shape = Part.Shape()
-                return
 
         except Exception:
-            FreeCAD.Console.PrintError(f"Error executing script for {obj.Label}:\n{traceback.format_exc()}\n")
+            FreeCAD.Console.PrintError(f"Error executing script:\n{traceback.format_exc()}\n")
             obj.Shape = Part.Shape()
 
 
@@ -328,14 +262,11 @@ class CadQueryFeature:
         if getattr(self, '_is_internal_change', False):
             return
 
-        FreeCAD.Console.PrintMessage(f"onChanged called for {obj.Label}, property: {prop}\n")
-
         if not hasattr(obj, "Document") or not obj.Document:
              return
 
         if prop == "CodeCache":
             if obj.SourceMode != "Cache":
-                FreeCAD.Console.PrintMessage("CodeCache edited, automatically switching SourceMode to 'Cache'.\n")
                 obj.SourceMode = "Cache"
             else:
                 self.execute(obj)
@@ -346,55 +277,41 @@ class CadQueryFeature:
                 self.execute(obj)
             return
 
-        if prop == "CodeURL" and obj.SourceMode == "URL":
-            if not obj.CacheEnabled:
-                 self.execute(obj)
-            else:
-                 pass
-
 # --- View Provider Class ---
 class CadQueryFeatureViewProvider:
     """Controls how the CadQueryFeature object appears in the GUI."""
 
     def __init__(self, vobj):
         """Called when the ViewObject is created or restored."""
-        obj_label = getattr(vobj.Object, "Label", "<Unknown>")
-        FreeCAD.Console.PrintMessage(f"ViewProvider __init__ called for object: {obj_label}\n")
         vobj.Proxy = self
-        self.ViewObject = vobj # Store for potential future use
+        # REMOVED: self.ViewObject = vobj 
+        # Storing the C++ ViewObject in the Python Proxy causes JSON serialization failure.
+
+    def __getstate__(self):
+        """Return empty dict; no serializable state needed for this ViewProvider."""
+        return {}
+
+    def __setstate__(self, state):
+        pass
 
     def getIcon(self):
-        """Returns the absolute path to the icon for the Tree View."""
-        icon_path = os.path.join(ICON_PATH, "CQ_Logo.svg")
-        if not os.path.exists(icon_path):
-             FreeCAD.Console.PrintWarning(f"getIcon: Icon file not found at path: {icon_path}\n")
-        return icon_path
+        """Returns the absolute path to the icon."""
+        return os.path.join(ICON_PATH, "CQ_Logo.svg")
 
     def _triggerEditCode(self, viewObject):
         """Action for the 'Edit Code' context menu item."""
-        FreeCAD.Console.PrintMessage("_triggerEditCode called!\n")
         dataObject = viewObject.Object
         if dataObject and cq_editor_tools:
              cq_editor_tools.launch_editor_for_feature(dataObject)
-        elif not cq_editor_tools:
-            FreeCAD.Console.PrintError("cq_editor_tools module not loaded, cannot launch editor.\n")
-        else:
-             FreeCAD.Console.PrintError("Could not get data object from view object in context menu action.\n")
 
     def setupContextMenu(self, viewObject, menu):
         """Adds items to the context menu."""
-        if not QtGui: return # Safety check if Qt import failed
-
-        obj_label = getattr(viewObject.Object, "Label", "<Unknown>")
-        FreeCAD.Console.PrintMessage(f"setupContextMenu called for: {obj_label}\n")
+        if not QtGui: return 
 
         edit_icon_path = os.path.join(ICON_PATH, "CQ_Edit.svg")
-
         if os.path.exists(edit_icon_path):
-            edit_icon = QtGui.QIcon(edit_icon_path)
-            action = menu.addAction(edit_icon, "Edit CadQuery Code")
+            action = menu.addAction(QtGui.QIcon(edit_icon_path), "Edit CadQuery Code")
         else:
-            FreeCAD.Console.PrintWarning(f"setupContextMenu: Edit icon not found at {edit_icon_path}\n")
-            action = menu.addAction("Edit CadQuery Code") # Add without icon
+            action = menu.addAction("Edit CadQuery Code")
 
         action.triggered.connect(lambda: self._triggerEditCode(viewObject))
