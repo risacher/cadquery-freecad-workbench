@@ -13,10 +13,15 @@ import os
 # --- Globals: Use a dictionary to track multiple patched editors ---
 _installed_patches = {}
 
-def install_patch_with_link(target_filename, target_object_name):
+def install_patch_with_link(target_filename, target_object_name, target_doc_name):
     """
     Finds an editor by its MDI window title, links it to a specific
     CadQuery object via a custom property, and installs event monitoring.
+
+    The document name is recorded alongside the object name: resolving the
+    target through FreeCAD.ActiveDocument instead meant that switching
+    documents with an editor open wrote the code into whatever happened to be
+    active, or silently nowhere.
     """
     global _installed_patches
 
@@ -39,6 +44,7 @@ def install_patch_with_link(target_filename, target_object_name):
     
     # Store the object's unique name as a custom property on the editor window
     editor_sub_window.setProperty("targetCQObjectName", target_object_name)
+    editor_sub_window.setProperty("targetCQDocName", target_doc_name)
     editor_sub_window.setProperty("targetTempFilename", target_filename)
 
     # Install our custom event filter that monitors both save and close
@@ -56,8 +62,14 @@ def install_editor_monitor(editor_sub_window, editor_widget, target_filename):
             self.sub_window = sub_window
             self.editor = editor
             self.filename = filename
-            self.last_saved_content = editor.toPlainText()
-            
+            # Seed from the file, not the widget, so the first poll compares
+            # like with like. They agree at install time -- the file was just
+            # written from CodeCache -- but only the file is authoritative.
+            self.last_saved_content = self._read_file()
+            if self.last_saved_content is None:
+                self.last_saved_content = editor.toPlainText()
+
+
             # Install a timer to periodically check if file was saved
             self.check_timer = QtCore.QTimer(self)
             self.check_timer.timeout.connect(self.check_for_save)
@@ -69,43 +81,68 @@ def install_editor_monitor(editor_sub_window, editor_widget, target_filename):
                 self.on_editor_close()
             return super().eventFilter(watched_obj, event)
         
-        def check_for_save(self):
-            """Periodically check if the editor content has been saved to disk."""
+        def _read_file(self):
+            """Current contents of the temp file, or None if unreadable."""
             try:
-                # Check if the temp file exists and has been modified
                 if os.path.exists(self.filename):
                     with open(self.filename, 'r', encoding='utf-8') as f:
-                        file_content = f.read()
-                    
-                    # If file content differs from what we last processed, it was saved
-                    if file_content != self.last_saved_content:
-                        FreeCAD.Console.PrintMessage(f"Detected save of CQ editor file.\n")
-                        self.update_cadquery_object()
-                        self.last_saved_content = file_content
-            except Exception as e:
-                FreeCAD.Console.PrintError(f"Error checking for save: {e}\n")
-        
-        def update_cadquery_object(self):
-            """Update the CadQuery object from the editor content."""
+                        return f.read()
+            except OSError as e:
+                FreeCAD.Console.PrintError(f"Error reading CQ editor file: {e}\n")
+            return None
+
+        def check_for_save(self):
+            """Periodically check if the editor content has been saved to disk."""
+            file_content = self._read_file()
+            if file_content is None or file_content == self.last_saved_content:
+                return
+            FreeCAD.Console.PrintMessage("Detected save of CQ editor file.\n")
+            # Push what is ON DISK. This previously detected the change by
+            # reading the file and then pushed self.editor.toPlainText()
+            # instead, so an edit made to the temp file outside the widget was
+            # noticed and then immediately discarded.
+            self.last_saved_content = file_content
+            self.update_cadquery_object(file_content)
+
+        def _target_object(self):
+            """Resolve the linked feature via its OWN document, not the active one."""
             obj_name = self.sub_window.property("targetCQObjectName")
-            if obj_name:
-                doc = FreeCAD.ActiveDocument
-                if doc:
-                    target_obj = doc.getObject(obj_name)
-                    if target_obj:
-                        source_code = self.editor.toPlainText()
-                        target_obj.CodeCache = source_code.splitlines()
-                        target_obj.recompute()
-                        FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}'.\n")
-        
+            doc_name = self.sub_window.property("targetCQDocName")
+            if not obj_name:
+                return None
+            doc = None
+            if doc_name:
+                doc = FreeCAD.listDocuments().get(doc_name)
+                if doc is None:
+                    FreeCAD.Console.PrintWarning(
+                        f"Document '{doc_name}' for this CQ editor is no longer open; "
+                        f"changes will not be applied.\n")
+                    return None
+            else:
+                doc = FreeCAD.ActiveDocument      # links made before this field existed
+            return doc.getObject(obj_name) if doc else None
+
+        def update_cadquery_object(self, source_code):
+            """Update the CadQuery object from the given source text."""
+            target_obj = self._target_object()
+            if not target_obj:
+                return
+            target_obj.CodeCache = source_code.splitlines()
+            target_obj.recompute()
+            FreeCAD.Console.PrintMessage(f"Updated and recomputed '{target_obj.Label}'.\n")
+
+
         def on_editor_close(self):
             """Handle editor close - update CadQuery object and cleanup."""
             # Stop the timer
             self.check_timer.stop()
-            
-            # Final update on close
-            self.update_cadquery_object()
-            
+
+            # Final update on close. Deliberately the WIDGET text, not the file:
+            # the temp file is about to be deleted, so this is the last chance
+            # to capture edits the user never saved.
+            self.update_cadquery_object(self.editor.toPlainText())
+
+
             # Cleanup
             if self.filename in _installed_patches:
                 del _installed_patches[self.filename]
@@ -148,7 +185,9 @@ def launch_editor_for_feature(obj):
     FreeCADGui.open(temp_path)
     
     # Use a short delay to ensure the editor window is fully created
+    doc_name = obj.Document.Name if getattr(obj, "Document", None) else None
+
     def delayed_patch():
-        install_patch_with_link(temp_path, obj.Name)
+        install_patch_with_link(temp_path, obj.Name, doc_name)
     
     QtCore.QTimer.singleShot(100, delayed_patch)

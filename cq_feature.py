@@ -3,6 +3,7 @@
 import FreeCAD
 import urllib.request
 import os
+import sys
 import traceback
 from io import BytesIO
 from urllib.parse import urlparse
@@ -59,8 +60,52 @@ try:
 except ImportError:
     cq_utils = None
     FreeCAD.Console.PrintWarning("Could not import cq_utils. Security check on load will be bypassed.\n")
-    # Define a dummy function if import fails to prevent NameError later
-    def is_safe_to_execute(obj): return True
+
+
+def local_script_path(obj):
+    """Filesystem path of the script, when CodeURL is a file:// URL, else None."""
+    url = getattr(obj, "CodeURL", "") or ""
+    if getattr(obj, "SourceMode", None) != "URL" or not url:
+        return None
+    parts = urlparse(url)
+    if parts.scheme != "file":
+        return None
+    return urllib.request.url2pathname(parts.path)
+
+
+def to_cq_shape(result_obj):
+    """Coerce whatever the script produced into a single cadquery Shape.
+
+    This used to be an `isinstance(result_obj, (cq.Workplane, cq.Shape))` test
+    with no else branch, so anything else -- a cq.Assembly, a cq.Sketch, a
+    build123d object -- left obj.Shape untouched and reported nothing at all.
+    The script appeared to run and simply had no effect, which is the hardest
+    kind of failure to chase. Unsupported types now raise.
+    """
+    if isinstance(result_obj, cq.Workplane):
+        result_obj = result_obj.val()
+
+    if isinstance(result_obj, cq.Shape):
+        return result_obj
+
+    # cq.Assembly
+    to_compound = getattr(result_obj, "toCompound", None)
+    if callable(to_compound):
+        shape = to_compound()
+        if isinstance(shape, cq.Shape):
+            return shape
+
+    # build123d, and anything else holding a raw OCCT TopoDS_Shape
+    wrapped = getattr(result_obj, "wrapped", None)
+    if wrapped is not None:
+        try:
+            return cq.Shape.cast(wrapped)
+        except Exception:
+            pass
+
+    raise TypeError(
+        f"cannot turn a {type(result_obj).__name__} into a shape; return a "
+        f"cadquery Workplane, Shape or Assembly, or a build123d object")
 
 
 # --- Data Proxy Class ---
@@ -124,21 +169,34 @@ class CadQueryFeature:
         # all during openDocument. So execute() keeps the saved shape and the
         # first explicit recompute picks up code and parameter changes.
 
+    @staticmethod
+    def _fail(obj, message, level="error"):
+        """Report a failure WITHOUT discarding the last good shape.
+
+        Every error path used to assign Part.Shape(), so a transient problem --
+        being offline with SourceMode=URL, a syntax error mid-edit -- silently
+        deleted the geometry and you had to rebuild to get it back. The shape is
+        now only ever replaced by a successful build.
+        """
+        text = f"{obj.Label}: {message} (keeping the last built shape)\n"
+        if level == "warning":
+            FreeCAD.Console.PrintWarning(text)
+        else:
+            FreeCAD.Console.PrintError(text)
+
     def execute(self, obj):
         """Recomputes the object based on the selected SourceMode and parameters."""
         if cq is None:
-            FreeCAD.Console.PrintError(f"Cannot execute '{obj.Label}': CadQuery module is not installed.\n")
-            obj.Shape = Part.Shape()
+            self._fail(obj, "CadQuery module is not installed")
             return
 
-        is_safe = True 
+        is_safe = True
         if cq_utils and hasattr(cq_utils, 'is_safe_to_execute'):
             is_safe = cq_utils.is_safe_to_execute(obj)
 
         if not is_safe and FreeCAD.GuiUp:
-            FreeCAD.Console.PrintWarning(f"Execution of '{obj.Label}' deferred pending document security check.\n")
-            if obj.SourceMode != "Frozen":
-                 obj.Shape = Part.Shape() 
+            self._fail(obj, "execution deferred pending document security check",
+                       level="warning")
             return
 
         # FreeCAD recomputes objects while the document is still being restored.
@@ -152,15 +210,17 @@ class CadQueryFeature:
         if 'Restore' in obj.State:
             return
 
-        FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
-        source_code = ""
-
+        # Frozen means "do not run"; say nothing rather than logging a build
+        # that is not about to happen.
         if obj.SourceMode == "Frozen":
             return
 
+        FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
+        source_code = ""
+
         if obj.SourceMode == "URL":
             if not hasattr(obj, "CodeURL") or not obj.CodeURL:
-                obj.Shape = Part.Shape()
+                self._fail(obj, "SourceMode is URL but CodeURL is empty")
                 return
             try:
                 hdr = {'User-Agent': 'FreeCAD-CadQuery-Workbench'}
@@ -173,19 +233,18 @@ class CadQueryFeature:
                         obj.CodeCache = source_code.splitlines()
                     finally:
                         self._is_internal_change = False
-            except Exception:
-                FreeCAD.Console.PrintError(f"Failed to fetch from URL: {obj.CodeURL}\n")
-                obj.Shape = Part.Shape()
+            except Exception as e:
+                self._fail(obj, f"failed to fetch {obj.CodeURL}: {e}")
                 return
 
         elif obj.SourceMode == "Cache":
             if not obj.CodeCache:
-                obj.Shape = Part.Shape()
+                self._fail(obj, "SourceMode is Cache but CodeCache is empty")
                 return
             source_code = "\n".join(obj.CodeCache)
 
         if not source_code:
-            obj.Shape = Part.Shape()
+            self._fail(obj, "no source code to execute")
             return
 
         collected_shapes = []
@@ -199,9 +258,25 @@ class CadQueryFeature:
         script_locals = {
             'cq': cq,
             'show': show_shim,
-            'show_object': show_object_shim
+            'show_object': show_object_shim,
+            # exec() does not define __name__, so it resolves through
+            # __builtins__ to 'builtins' and a script's
+            # `if __name__ == "__main__":` block silently never runs -- the
+            # script loads and appears to do nothing. Most CadQuery scripts are
+            # written to also be runnable on their own, so this matters.
+            '__name__': '__main__',
         }
-        
+
+        # Give a file:// script the same footing it would have if run directly:
+        # it can find its own assets and import modules sitting next to it.
+        script_path = local_script_path(obj)
+        if script_path:
+            script_locals['__file__'] = script_path
+            script_dir = os.path.dirname(script_path)
+            if script_dir and script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
+
+
         if hasattr(obj, "ParameterSource") and obj.ParameterSource:
             param_obj = obj.ParameterSource
             try:
@@ -259,33 +334,25 @@ class CadQueryFeature:
             if result_obj is None:
                 result_obj = script_locals.get('result')
 
-            if not result_obj:
-                obj.Shape = Part.Shape()
+            if result_obj is None:
+                self._fail(obj, "the script produced no result: call show_object(), "
+                                "or leave the shape in a variable named 'result'")
                 return
 
+            # Raises TypeError on anything it cannot handle, rather than
+            # silently leaving the shape untouched.
+            actual_shape = to_cq_shape(result_obj)
+
             brep_stream = BytesIO()
-            if isinstance(result_obj, (cq.Workplane, cq.Shape)):
-                shape_to_export = result_obj.val() if isinstance(result_obj, cq.Workplane) else result_obj
-                actual_shape = None
-                if isinstance(shape_to_export, cq.Shape):
-                    actual_shape = shape_to_export
-                elif hasattr(shape_to_export, "val") and callable(shape_to_export.val):
-                   val_result = shape_to_export.val()
-                   if isinstance(val_result, cq.Shape):
-                       actual_shape = val_result
-
-                if actual_shape is None:
-                    raise TypeError("Result extraction failed.")
-
-                actual_shape.exportBrep(brep_stream)
-                part_shape = Part.Shape()
-                brep_string = brep_stream.getvalue().decode('utf-8')
-                part_shape.importBrepFromString(brep_string)
-                obj.Shape = part_shape
+            actual_shape.exportBrep(brep_stream)
+            part_shape = Part.Shape()
+            part_shape.importBrepFromString(brep_stream.getvalue().decode('utf-8'))
+            obj.Shape = part_shape
 
         except Exception:
-            FreeCAD.Console.PrintError(f"Error executing script:\n{traceback.format_exc()}\n")
-            obj.Shape = Part.Shape()
+            FreeCAD.Console.PrintError(
+                f"Error executing script for {obj.Label}:\n{traceback.format_exc()}")
+            self._fail(obj, "script raised; shape not updated")
 
 
     def onChanged(self, obj, prop):
