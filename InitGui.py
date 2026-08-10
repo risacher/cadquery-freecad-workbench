@@ -36,26 +36,33 @@ class GlobalDocumentObserver:
             except ImportError:
                  FreeCAD.Console.PrintError("FATAL: Could not import cq_utils inside observer. Security checks will fail.\n")
                  # Define dummy functions if import fails
-                 def mark_document_checked(doc_name): pass
+                 def mark_document_checked(doc_key): pass
+                 def unmark_document_checked(doc_key): pass
                  def get_checked_documents_set(): return set()
+                 def document_key(doc):
+                     return getattr(doc, "Uid", None) or getattr(doc, "Name", None)
                  cq_utils = type('obj', (object,), {
                      'mark_document_checked': mark_document_checked,
-                     'get_checked_documents_set': get_checked_documents_set
+                     'unmark_document_checked': unmark_document_checked,
+                     'get_checked_documents_set': get_checked_documents_set,
+                     'document_key': document_key
                  })()
 
         except ImportError as e:
             FreeCAD.Console.PrintError(f"Core import failed in DocumentObserver ({e}). Security timer will not run.\n")
             # Mark as checked immediately if timer cannot run
             if hasattr(doc, "Document") and doc.Document and cq_utils:
-                 cq_utils.mark_document_checked(doc.Document.Name)
+                 cq_utils.mark_document_checked(cq_utils.document_key(doc.Document))
             return
 
-        # Use App.Document.Name which is the unique identifier
+        # Name identifies the document for lookup; the CLEARANCE is keyed on
+        # Uid, because Names are recycled between documents.
         if hasattr(doc, "Document") and doc.Document:
              doc_name = doc.Document.Name
+             doc_key = cq_utils.document_key(doc.Document) if cq_utils else None
              # Check using cq_utils' set via its getter
              # Ensure cq_utils was successfully imported before using it
-             if cq_utils and doc_name not in cq_utils.get_checked_documents_set():
+             if cq_utils and doc_key not in cq_utils.get_checked_documents_set():
                  callback = functools.partial(self._checkAndFreezeFeatures, doc_name)
                  QtCore.QTimer.singleShot(300, callback) # Increased delay slightly
              # else: # Verbose logging
@@ -64,6 +71,23 @@ class GlobalDocumentObserver:
 
         else:
              FreeCAD.Console.PrintWarning("slotCreatedDocument received Gui.Document without App.Document link, skipping security check timer.\n")
+
+
+    def slotDeletedDocument(self, doc):
+        """Drop a closed document's clearance so the set does not grow forever.
+
+        Best-effort only: by the time this fires the App document may already be
+        gone, and that is fine. Clearances are keyed on Uid, so a stale entry
+        can no longer let an unrelated file through -- this is hygiene, not the
+        security control.
+        """
+        try:
+            import cq_utils
+            app_doc = getattr(doc, "Document", None)
+            if app_doc is not None:
+                cq_utils.unmark_document_checked(cq_utils.document_key(app_doc))
+        except Exception:
+            pass
 
 
     def _checkAndFreezeFeatures(self, doc_name):
@@ -76,16 +100,18 @@ class GlobalDocumentObserver:
              FreeCAD.Console.PrintError("FATAL: Could not import cq_utils in timer callback. Cannot mark document checked.\n")
              return # Cannot proceed without utils
 
-        # Check again using cq_utils getter
-        if doc_name in cq_utils.get_checked_documents_set():
-             return
-
-        FreeCAD.Console.PrintMessage(f"Timer callback: Running security check for doc_name '{doc_name}'...\n")
-
+        # Resolve the document FIRST: the clearance is keyed on its Uid, so the
+        # "already checked?" test cannot be made from the name alone.
         doc = FreeCAD.getDocument(doc_name)
         if not doc:
             FreeCAD.Console.PrintError(f"Timer callback: Could not get document '{doc_name}'.\n")
             return
+
+        doc_key = cq_utils.document_key(doc)
+        if doc_key in cq_utils.get_checked_documents_set():
+             return
+
+        FreeCAD.Console.PrintMessage(f"Timer callback: Running security check for doc_name '{doc_name}'...\n")
 
         FreeCAD.Console.PrintMessage(f"Running security check for document '{doc.Label}'...\n")
         features_to_freeze = []
@@ -119,7 +145,7 @@ class GlobalDocumentObserver:
         finally:
              if processed_ok and cq_utils: # Ensure cq_utils exists before using
                  # Use cq_utils to mark checked
-                 cq_utils.mark_document_checked(doc_name)
+                 cq_utils.mark_document_checked(doc_key)
                  FreeCAD.Console.PrintMessage(f"Document '{doc.Label}' security check complete and marked.\n")
              elif not processed_ok:
                  FreeCAD.Console.PrintError(f"Document '{doc_name}' security check failed. Execution may remain blocked.\n")

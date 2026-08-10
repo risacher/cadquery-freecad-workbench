@@ -190,9 +190,25 @@ class CadQueryFeature:
             self._fail(obj, "CadQuery module is not installed")
             return
 
-        is_safe = True
+        # Frozen means "do not run": nothing is fetched and no code executes, so
+        # there is nothing for the security check below to clear. Returning here
+        # also keeps a missing cq_utils from warning about frozen objects.
+        if obj.SourceMode == "Frozen":
+            return
+
         if cq_utils and hasattr(cq_utils, 'is_safe_to_execute'):
             is_safe = cq_utils.is_safe_to_execute(obj)
+        else:
+            # cq_utils is what decides whether this document has been cleared.
+            # If it is unavailable that decision cannot be made, so refuse --
+            # this used to default to True, and a security control that
+            # disables itself when its own helper fails to import is not a
+            # control. Loud, because the likely cause is a broken install
+            # rather than an attack.
+            is_safe = False
+            FreeCAD.Console.PrintError(
+                "cq_utils is unavailable, so document clearance cannot be "
+                "checked; refusing to execute CadQuery scripts.\n")
 
         if not is_safe and FreeCAD.GuiUp:
             self._fail(obj, "execution deferred pending document security check",
@@ -208,11 +224,6 @@ class CadQueryFeature:
         # document is open rebuilds it with the sheet readable. See the note in
         # onDocumentRestored for why that cannot be scheduled automatically.
         if 'Restore' in obj.State:
-            return
-
-        # Frozen means "do not run"; say nothing rather than logging a build
-        # that is not about to happen.
-        if obj.SourceMode == "Frozen":
             return
 
         FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
@@ -362,6 +373,14 @@ class CadQueryFeature:
 
         if not hasattr(obj, "Document") or not obj.Document:
              return
+
+        # Property changes fire during document restore and during undo/redo.
+        # Reacting to them means a synchronous URL fetch and exec() at a moment
+        # the user never initiated. execute() refuses to build during restore
+        # anyway; stopping here says so at the site that triggers it, rather
+        # than relying on the callee to notice.
+        if 'Restore' in obj.State:
+            return
 
         if prop == "CodeCache":
             if obj.SourceMode != "Cache":

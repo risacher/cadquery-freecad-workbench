@@ -93,6 +93,19 @@ def install_editor_monitor(editor_sub_window, editor_widget, target_filename):
 
         def check_for_save(self):
             """Periodically check if the editor content has been saved to disk."""
+            try:
+                self._check_for_save()
+            except Exception as e:
+                # This runs from a Qt slot every 500 ms. If the sub-window's C++
+                # side has been destroyed, property() raises RuntimeError, and
+                # an unguarded body would then raise on every single tick.
+                # A monitor that cannot read its own window is finished, so stop
+                # rather than spam; on_editor_close still runs via the event
+                # filter if the close event arrives.
+                FreeCAD.Console.PrintError(f"Error checking for save: {e}\n")
+                self.check_timer.stop()
+
+        def _check_for_save(self):
             file_content = self._read_file()
             if file_content is None or file_content == self.last_saved_content:
                 return
