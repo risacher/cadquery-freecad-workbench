@@ -95,13 +95,28 @@ def to_cq_shape(result_obj):
         if isinstance(shape, cq.Shape):
             return shape
 
-    # build123d, and anything else holding a raw OCCT TopoDS_Shape
+    # build123d, and anything else holding a raw OCCT TopoDS_Shape. Both
+    # libraries bind the same kernel through the same OCP wheel, so a
+    # build123d part is a TopoDS_Shape we can cast directly.
     wrapped = getattr(result_obj, "wrapped", None)
     if wrapped is not None:
         try:
             return cq.Shape.cast(wrapped)
         except Exception:
             pass
+
+    # build123d Builder objects (BuildPart / BuildSketch / BuildLine) are not
+    # shapes themselves -- the geometry hangs off a mode-specific attribute --
+    # so `show_object(bp)` instead of `show_object(bp.part)` would otherwise
+    # land on the TypeError below.
+    for attr in ("part", "sketch", "line"):
+        inner = getattr(result_obj, attr, None)
+        inner_wrapped = getattr(inner, "wrapped", None) if inner is not None else None
+        if inner_wrapped is not None:
+            try:
+                return cq.Shape.cast(inner_wrapped)
+            except Exception:
+                pass
 
     raise TypeError(
         f"cannot turn a {type(result_obj).__name__} into a shape; return a "
@@ -333,14 +348,14 @@ class CadQueryFeature:
                 if len(collected_shapes) == 1:
                     result_obj = collected_shapes[0]
                 else:
-                    shapes_to_combine = []
-                    for shape in collected_shapes:
-                        if isinstance(shape, cq.Workplane):
-                            shapes_to_combine.append(shape.val())
-                        elif isinstance(shape, cq.Shape):
-                            shapes_to_combine.append(shape)
-                    if shapes_to_combine:
-                        result_obj = cq.Compound.makeCompound(shapes_to_combine)
+                    # Route every collected object through the same coercion the
+                    # single-result path uses. The inline isinstance test that
+                    # was here recognised only cadquery types, so a script
+                    # calling show_object() more than once with build123d parts
+                    # had them all dropped and reported "no result" -- and an
+                    # unsupported type vanished instead of raising.
+                    result_obj = cq.Compound.makeCompound(
+                        [to_cq_shape(s) for s in collected_shapes])
             
             if result_obj is None:
                 result_obj = script_locals.get('result')

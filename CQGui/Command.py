@@ -8,11 +8,60 @@ import FreeCADGui
 from PySide import QtGui
 from CQGui.HelpDialog import HelpDialog
 
-import cq_feature 
-import cq_editor_tools 
+import cq_feature
+import cq_editor_tools
 import os
+import sys
+import subprocess
 
 EDIT_SESSION = {}
+
+
+def _pip(*args):
+    """Run pip against the interpreter FreeCAD is actually using.
+
+    These commands used to shell out to bare "python", which resolves through
+    PATH. On a typical Linux box that is the system interpreter -- here
+    /usr/bin/python is 3.12 while FreeCAD embeds 3.11 -- so packages landed in
+    a site-packages FreeCAD never reads and the install appeared to succeed
+    while changing nothing.
+
+    sys.executable is not a drop-in substitute either: in an AppImage build it
+    is the freecad binary itself, and there is no python3 anywhere on the
+    prefix to invoke. pip is importable in-process though, so when we have no
+    interpreter to call, drive it here instead.
+
+    Note pip decides for itself where to install; under the read-only AppImage
+    mount it falls back to a --user install, which is why ~/.local/lib/python3.11
+    is where cadquery already lives.
+    """
+    args = [str(a) for a in args]
+    exe = sys.executable or ""
+
+    if os.path.basename(exe).lower().startswith("python"):
+        print("$ " + " ".join([exe, "-m", "pip"] + args))
+        return subprocess.run([exe, "-m", "pip"] + args).returncode
+
+    print("$ <FreeCAD's embedded python> -m pip " + " ".join(args))
+    import runpy
+    saved_argv = sys.argv
+    try:
+        sys.argv = ["pip"] + args
+        runpy.run_module("pip", run_name="__main__")
+        return 0
+    except SystemExit as e:                 # pip always exits
+        return e.code if isinstance(e.code, int) else 0
+    finally:
+        sys.argv = saved_argv
+
+
+def _report(name, codes):
+    """Say whether an install actually worked, rather than always claiming it did."""
+    if any(codes):
+        print(f"{name} install FAILED (pip exit codes {codes}). Nothing was changed "
+              f"that you can rely on; see the messages above.")
+    else:
+        print(f"{name} has been installed! Please restart FreeCAD.")
 
 GUI_PATH = os.path.dirname(__file__)
 # This builds the full path to your icons folder
@@ -66,11 +115,10 @@ class CadQueryStableInstall:
         return True
 
     def Activated(self):
-        import subprocess
         print("Starting to install CadQuery stable...")
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "cadquery==2.5.2"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "cadquery-ocp==7.7.2"], capture_output=False)
-        print("CadQuery stable has been installed! Please restart FreeCAD.")
+        codes = [_pip("install", "--upgrade", "cadquery==2.5.2"),
+                 _pip("install", "--upgrade", "cadquery-ocp==7.7.2")]
+        _report("CadQuery stable", codes)
 
 
 class CadQueryUnstableInstall:
@@ -89,14 +137,13 @@ class CadQueryUnstableInstall:
 
     def Activated(self):
         print("Starting to install CadQuery unstable...")
-        import subprocess
-        subprocess.run(["python", "-m", "pip", "uninstall", "-y", "vtk"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "uninstall", "-y", "cadquery-vtk"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "vtk==9.3.1"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "uninstall", "-y", "cadquery-ocp"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "cadquery-ocp==7.8.1.0"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "https://github.com/CadQuery/cadquery.git"], capture_output=False)
-        print("CadQuery unstable has been installed! Please restart FreeCAD.")
+        _pip("uninstall", "-y", "vtk")
+        _pip("uninstall", "-y", "cadquery-vtk")
+        _pip("uninstall", "-y", "cadquery-ocp")
+        codes = [_pip("install", "--upgrade", "vtk==9.3.1"),
+                 _pip("install", "--upgrade", "cadquery-ocp==7.8.1.0"),
+                 _pip("install", "--upgrade", "https://github.com/CadQuery/cadquery.git")]
+        _report("CadQuery unstable", codes)
 
 
 class Build123DInstall:
@@ -114,11 +161,14 @@ class Build123DInstall:
         return True
 
     def Activated(self):
-        import subprocess
         print("Starting to install Build123d...")
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "build123d"], capture_output=False)
-        subprocess.run(["python", "-m", "pip", "install", "--upgrade", "cadquery-ocp==7.8.1.1.post1"], capture_output=False)
-        print("Build123d has been installed! Please restart FreeCAD.")
+        # NB: this forces cadquery-ocp to 7.8.1.1, but cadquery 2.5.2 declares
+        # cadquery-ocp<7.8. Running this against a 2.5.x install will break
+        # CadQuery. Upgrade cadquery to a 7.8-compatible release in the same
+        # go, or pin a build123d that still targets OCP 7.7.
+        codes = [_pip("install", "--upgrade", "build123d"),
+                 _pip("install", "--upgrade", "cadquery-ocp==7.8.1.1.post1")]
+        _report("Build123d", codes)
 
 
 class CadQueryClearOutput:
