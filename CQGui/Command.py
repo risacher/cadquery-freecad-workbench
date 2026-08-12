@@ -135,29 +135,15 @@ class CadQueryStableInstall:
         _report("CadQuery stable", codes)
 
 
-class CadQueryUnstableInstall:
-    """
-    Allows the user to easily attempt a manual install of the unstable version of CadQuery
-    """
-
-    def GetResources(self):
-        return {"MenuText": "Install CadQuery Unstable",
-                "Accel": "",
-                "ToolTip": "Installs the unstable version of CadQuery",
-                "Pixmap": ":/icons/preferences-system.svg"}
-
-    def IsActive(self):
-        return True
-
-    def Activated(self):
-        print("Starting to install CadQuery unstable...")
-        _pip("uninstall", "-y", "vtk")
-        _pip("uninstall", "-y", "cadquery-vtk")
-        _pip("uninstall", "-y", "cadquery-ocp")
-        codes = [_pip("install", "--upgrade", "vtk==9.3.1"),
-                 _pip("install", "--upgrade", "cadquery-ocp==7.8.1.0"),
-                 _pip("install", "--upgrade", "https://github.com/CadQuery/cadquery.git")]
-        _report("CadQuery unstable", codes)
+# CadQueryUnstableInstall was removed. It could not do what it claimed: the
+# final step passed a bare "https://github.com/CadQuery/cadquery.git" to pip,
+# which is not a VCS spec, so pip fetched GitHub's HTML page and failed with
+# "cannot detect archive format". Its destructive steps ran FIRST -- uninstall
+# vtk / cadquery-vtk / cadquery-ocp, then pin vtk==9.3.1 and
+# cadquery-ocp==7.8.1.0 -- so pressing it tore down a working install,
+# downgraded OCP below what build123d needs, and then failed at the one step
+# that was the point. To track cadquery master, use:
+#     pip install --upgrade git+https://github.com/CadQuery/cadquery.git
 
 
 class Build123DInstall:

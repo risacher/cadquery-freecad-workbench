@@ -10,7 +10,6 @@ import traceback
 from CQGui.Command import (CadQueryHelp,
                            CadQueryClearOutput,
                            CadQueryStableInstall,
-                           CadQueryUnstableInstall,
                            CadQueryCreateFeature,
                            EditCQCodeCmd,
                            Build123DInstall)
@@ -165,7 +164,6 @@ class CadQueryWorkbench (Workbench):
 
         self.appendMenu('CadQuery', ['CadQueryClearOutput'])
         self.appendMenu(['CadQuery', 'Install'], ["CadQueryStableInstall",
-                                                  "CadQueryUnstableInstall",
                                                   "Build123DInstall"])
         self.appendMenu('CadQuery', ['CadQueryHelp'])
 
@@ -187,7 +185,6 @@ except ImportError:
     pass
 
 FreeCADGui.addCommand('CadQueryStableInstall', CadQueryStableInstall())
-FreeCADGui.addCommand('CadQueryUnstableInstall', CadQueryUnstableInstall())
 FreeCADGui.addCommand('CadQueryCreateFeature', CadQueryCreateFeature())
 FreeCADGui.addCommand('Build123DInstall', Build123DInstall())
 FreeCADGui.addCommand('CadQueryClearOutput', CadQueryClearOutput())
