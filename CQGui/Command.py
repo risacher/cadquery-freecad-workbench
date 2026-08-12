@@ -116,8 +116,22 @@ class CadQueryStableInstall:
 
     def Activated(self):
         print("Starting to install CadQuery stable...")
-        codes = [_pip("install", "--upgrade", "cadquery==2.5.2"),
-                 _pip("install", "--upgrade", "cadquery-ocp==7.7.2")]
+        # Unpinned: "stable" means the current stable release, not a version
+        # frozen at the time this menu was written. The old pins were
+        # cadquery==2.5.2 with cadquery-ocp==7.7.2, which by now DOWNGRADES a
+        # working install, and drags OCP below what build123d needs.
+        #
+        # Resolve alongside build123d whenever it is present. The two share the
+        # OCP binding -- build123d pulls cadquery-ocp-novtk, a second
+        # distribution of the same OCP module -- so upgrading one behind the
+        # other's back is exactly what left this machine with two OCP packagings
+        # stacked on each other and nothing importable at all.
+        targets = ["cadquery"]
+        import importlib.util
+        if importlib.util.find_spec("build123d") is not None:
+            targets.append("build123d")
+            print("build123d is installed; resolving both together.")
+        codes = [_pip("install", "--upgrade", *targets)]
         _report("CadQuery stable", codes)
 
 
