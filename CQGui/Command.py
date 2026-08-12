@@ -162,13 +162,22 @@ class Build123DInstall:
 
     def Activated(self):
         print("Starting to install Build123d...")
-        # NB: this forces cadquery-ocp to 7.8.1.1, but cadquery 2.5.2 declares
-        # cadquery-ocp<7.8. Running this against a 2.5.x install will break
-        # CadQuery. Upgrade cadquery to a 7.8-compatible release in the same
-        # go, or pin a build123d that still targets OCP 7.7.
-        codes = [_pip("install", "--upgrade", "build123d"),
-                 _pip("install", "--upgrade", "cadquery-ocp==7.8.1.1.post1")]
-        _report("Build123d", codes)
+        # Install build123d AND cadquery in ONE pip invocation so the resolver
+        # has to satisfy both at once.
+        #
+        # This used to install build123d and then force
+        # cadquery-ocp==7.8.1.1.post1 in a separate command. cadquery 2.5.2
+        # declares cadquery-ocp<7.8, so that pin quietly broke CadQuery -- and
+        # worse, build123d depends on cadquery-ocp-NOVTK, a second
+        # distribution of the same OCP module. Installing both left two OCP
+        # packagings on top of each other and nothing imported at all:
+        #   ImportError: libvtkWrappingPythonCore3.11-9.3.so: cannot open
+        #   shared object file
+        # Resolving them together instead lands a consistent set (verified:
+        # cadquery 2.8.0 + cadquery-ocp 7.9.3.1.1 + build123d 0.11.1 + vtk
+        # 9.6.2, "pip check" clean, both libraries importable).
+        codes = [_pip("install", "--upgrade", "build123d", "cadquery")]
+        _report("Build123d + CadQuery", codes)
 
 
 class CadQueryClearOutput:
