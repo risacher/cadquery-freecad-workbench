@@ -17,32 +17,61 @@ import subprocess
 EDIT_SESSION = {}
 
 
+def _find_python():
+    """A real interpreter matching the one FreeCAD is running, or None.
+
+    Not sys.executable: in an AppImage build that is the freecad binary itself.
+    But the AppImage does ship an interpreter beside it at <prefix>/bin/python
+    -- note the bare name, no version suffix -- and it reports the same version
+    and the same user site-packages, so pip run through it installs exactly
+    where FreeCAD looks for imports.
+    """
+    exe = sys.executable or ""
+    if os.path.basename(exe).lower().startswith("python"):
+        return exe
+    for name in ("python", "python3", "python%d.%d" % sys.version_info[:2]):
+        cand = os.path.join(sys.prefix, "bin", name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def _pip(*args):
     """Run pip against the interpreter FreeCAD is actually using.
 
-    These commands used to shell out to bare "python", which resolves through
-    PATH. On a typical Linux box that is the system interpreter -- here
-    /usr/bin/python is 3.12 while FreeCAD embeds 3.11 -- so packages landed in
-    a site-packages FreeCAD never reads and the install appeared to succeed
-    while changing nothing.
+    These commands used to shell out to bare "python", resolved through PATH.
+    On a typical Linux box that is the system interpreter -- /usr/bin/python is
+    3.12 here while FreeCAD embeds 3.11 -- so packages landed in a
+    site-packages FreeCAD never reads and the install reported success having
+    changed nothing.
 
-    sys.executable is not a drop-in substitute either: in an AppImage build it
-    is the freecad binary itself, and there is no python3 anywhere on the
-    prefix to invoke. pip is importable in-process though, so when we have no
-    interpreter to call, drive it here instead.
-
-    Note pip decides for itself where to install; under the read-only AppImage
-    mount it falls back to a --user install, which is why ~/.local/lib/python3.11
-    is where cadquery already lives.
+    Output is captured and re-printed rather than inherited, because in the GUI
+    a subprocess writes to the terminal FreeCAD was launched from, which the
+    user is generally not looking at. Printing it puts it in the Report view.
     """
     args = [str(a) for a in args]
-    exe = sys.executable or ""
+    exe = _find_python()
 
-    if os.path.basename(exe).lower().startswith("python"):
+    if exe:
         print("$ " + " ".join([exe, "-m", "pip"] + args))
-        return subprocess.run([exe, "-m", "pip"] + args).returncode
+        print("(this can take a few minutes; output follows when it finishes)")
+        try:
+            proc = subprocess.run([exe, "-m", "pip"] + args,
+                                  capture_output=True, text=True)
+            if proc.stdout:
+                print(proc.stdout)
+            if proc.stderr:
+                print(proc.stderr)
+            return proc.returncode
+        except Exception as e:
+            print(f"could not run {exe} ({e}); falling back to in-process pip")
 
-    print("$ <FreeCAD's embedded python> -m pip " + " ".join(args))
+    # Last resort. This works headless but is fragile in the GUI: pip is not
+    # built to be imported and re-entered, and importing its command modules
+    # has been seen to fail there part-way through
+    # (pip._internal.self_outdated_check). Catch everything so a pip problem
+    # surfaces as a message rather than a traceback out of Activated().
+    print("$ <in-process pip> " + " ".join(args))
     import runpy
     saved_argv = sys.argv
     try:
@@ -51,6 +80,9 @@ def _pip(*args):
         return 0
     except SystemExit as e:                 # pip always exits
         return e.code if isinstance(e.code, int) else 0
+    except Exception as e:
+        print(f"in-process pip failed: {type(e).__name__}: {e}")
+        return 1
     finally:
         sys.argv = saved_argv
 
