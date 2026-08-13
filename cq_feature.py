@@ -62,6 +62,12 @@ except ImportError:
     FreeCAD.Console.PrintWarning("Could not import cq_utils. Security check on load will be bypassed.\n")
 
 
+# (document Name, source) pairs already warned about executing without a
+# clearance check. Session-scoped, so the notice appears once per document
+# rather than on every recompute.
+_HEADLESS_WARNED = set()
+
+
 def local_script_path(obj):
     """Filesystem path of the script, when CodeURL is a file:// URL, else None."""
     url = getattr(obj, "CodeURL", "") or ""
@@ -241,7 +247,30 @@ class CadQueryFeature:
         if 'Restore' in obj.State:
             return
 
-        FreeCAD.Console.PrintMessage(f"Executing {obj.Label}...\n")
+        source_desc = (obj.CodeURL if obj.SourceMode == "URL"
+                       else "code cached in the document")
+
+        # Name the source on every run. Whatever the trust policy ends up being,
+        # fetching code and executing it in silence is the part with no defence.
+        FreeCAD.Console.PrintMessage(f"Executing {obj.Label} from {source_desc}\n")
+
+        # The freeze-on-load check lives in InitGui.py, which only a GUI session
+        # loads, and is_safe_to_execute() returns True outright when GuiUp is
+        # false. Headless therefore runs whatever a document points at, with no
+        # clearance step at all. That is a deliberate trade -- freezing on load
+        # would make headless geometry builds pointless -- but it should be
+        # visible rather than implicit, so say so once per document per session.
+        if not FreeCAD.GuiUp:
+            key = (getattr(obj.Document, "Name", "?"), source_desc)
+            if key not in _HEADLESS_WARNED:
+                _HEADLESS_WARNED.add(key)
+                FreeCAD.Console.PrintWarning(
+                    f"SECURITY: {obj.Label} is executing code from {source_desc} "
+                    f"with no clearance check. The freeze-on-load protection is "
+                    f"GUI-only, so headless FreeCAD -- freecadcmd, or FreeCAD "
+                    f"imported as a library -- runs whatever a document points "
+                    f"at. Only open documents you trust this way.\n")
+
         source_code = ""
 
         if obj.SourceMode == "URL":
